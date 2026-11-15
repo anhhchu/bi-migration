@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<workbook>
+  <datasources>
+    <datasource name="sales" caption="Sales">
+      <connection class="sqlserver" server="legacy" dbname="warehouse">
+        <relation name="fact_sales" table="[dbo].[fact_sales]" type="table" />
+      </connection>
+      <column name="[Order ID]" caption="Order ID" datatype="string" role="dimension" />
+      <column name="[Sales]" caption="Sales" datatype="real" role="measure" />
+      <column name="[Margin]" caption="Margin %" datatype="real" role="measure">
+        <calculation formula="SUM([Profit]) / SUM([Sales])" />
+      </column>
+    </datasource>
+  </datasources>
+  <worksheets>
+    <worksheet name="Regional Sales">
+      <datasource-dependencies datasource="sales" />
+    </worksheet>
+  </worksheets>
+  <dashboards>
+    <dashboard name="Executive Sales"><zones><zone name="Regional Sales" /></zones></dashboard>
+  </dashboards>
+</workbook>

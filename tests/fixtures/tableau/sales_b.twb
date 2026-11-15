@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<workbook>
+  <datasources>
+    <datasource name="sales-copy" caption="Sales Copy">
+      <connection class="sqlserver" server="legacy" dbname="warehouse">
+        <relation name="fact_sales" table="[dbo].[fact_sales]" type="table" />
+      </connection>
+      <column name="[Region]" caption="Region" datatype="string" role="dimension" />
+    </datasource>
+  </datasources>
+  <worksheets><worksheet name="Sales by Region"><datasource-dependencies datasource="sales-copy" /></worksheet></worksheets>
+  <dashboards><dashboard name="Regional"><zones><zone name="Sales by Region" /></zones></dashboard></dashboards>
+</workbook>

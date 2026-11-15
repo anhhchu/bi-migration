@@ -1,0 +1,12 @@
+{
+  "tables": [
+    {
+      "name": "main.gold.orders",
+      "columns": [
+        {"name": "order_id", "type": "string", "synonyms": ["Order ID"]},
+        {"name": "sales_amount", "type": "real", "synonyms": ["Sales"]},
+        {"name": "region_name", "type": "string", "synonyms": ["Region"]}
+      ]
+    }
+  ]
+}
