@@ -1,0 +1,32 @@
+{
+  "tables": [
+    {
+      "name": "main.genie.superstore_orders",
+      "columns": [
+        {"name": "order_id", "type": "string", "synonyms": ["Order ID"]},
+        {"name": "order_date", "type": "date", "synonyms": ["Order Date"]},
+        {"name": "ship_date", "type": "date", "synonyms": ["Ship Date"]},
+        {"name": "ship_mode", "type": "string", "synonyms": ["Ship Mode"]},
+        {"name": "customer_name", "type": "string", "synonyms": ["Customer Name"]},
+        {"name": "segment", "type": "string", "synonyms": ["Segment"]},
+        {"name": "country", "type": "string", "synonyms": ["Country"]},
+        {"name": "state", "type": "string", "synonyms": ["State"]},
+        {"name": "region", "type": "string", "synonyms": ["Region"]},
+        {"name": "category", "type": "string", "synonyms": ["Category"]},
+        {"name": "sub_category", "type": "string", "synonyms": ["Sub-Category", "Sub Category"]},
+        {"name": "product_name", "type": "string", "synonyms": ["Product Name"]},
+        {"name": "sales", "type": "double", "synonyms": ["Sales"]},
+        {"name": "quantity", "type": "bigint", "synonyms": ["Quantity"]},
+        {"name": "discount", "type": "double", "synonyms": ["Discount"]},
+        {"name": "profit", "type": "double", "synonyms": ["Profit"]},
+        {"name": "returned", "type": "string", "synonyms": ["Returned"]}
+      ]
+    },
+    {
+      "name": "main.genie.superstore_toc_annotations",
+      "columns": [
+        {"name": "dashboard", "type": "string", "synonyms": ["Dashboard"]}
+      ]
+    }
+  ]
+}
