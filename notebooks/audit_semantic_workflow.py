@@ -7,9 +7,11 @@ for name in ("run_id", "group_run_path"):
     dbutils.widgets.text(name, "")
 run_id = dbutils.widgets.get("run_id").strip()
 group_run_path = Path(dbutils.widgets.get("group_run_path").rstrip("/"))
+manifest = json.loads((group_run_path / "group-migration-manifest.json").read_text(encoding="utf-8"))
 semantic_dir = group_run_path / "semantic"
 required = [
-    group_run_path / "session-1" / "dashboard-config.json",
+    Path(manifest["dashboard_manifest_path"]),
+    *[Path(workbook["output_path"]) / "dashboard-config.json" for workbook in manifest["workbooks"]],
     semantic_dir / "semantic-preflight.json",
     semantic_dir / "metric-view-result.json",
     semantic_dir / "genie-agent-result.json",
