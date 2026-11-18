@@ -4,8 +4,10 @@ import argparse
 import json
 from pathlib import Path
 
+from bi_migration.corpus import generate_corpus
 from bi_migration.grouping import dependency_graph, group_assets
 from bi_migration.mapping import draft_mapping, write_mapping_outputs
+from bi_migration.pipeline import run_backend_pipeline
 from bi_migration.tableau import find_tableau_files, parse_tableau
 
 
@@ -34,6 +36,36 @@ def analyze(args: argparse.Namespace) -> int:
     return 0
 
 
+def backend(args: argparse.Namespace) -> int:
+    result = run_backend_pipeline(
+        input_path=args.input,
+        mapping_documents_path=args.mapping_docs,
+        target_metadata_path=args.target_metadata,
+        domain=args.domain,
+        output_path=args.output,
+        run_id=args.run_id,
+        source_base_uri=args.source_base_uri,
+    )
+    print(
+        f"Registered {result['artifacts']} artifacts; inventoried {result['assets']} assets; "
+        f"quarantined {result['quarantined']}"
+    )
+    print(
+        f"Created {result['groups']} semantic groups; drafted {result['fields']} fields; "
+        f"{result['unresolved']} unresolved; ready={result['ready']}"
+    )
+    return 0
+
+
+def generate_test_corpus(args: argparse.Namespace) -> int:
+    result = generate_corpus(args.output)
+    print(
+        f"Generated {result['workbooks']} workbook artifacts and "
+        f"{result['mapping_documents']} mapping document under {result['output']}"
+    )
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="bi-migrate")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -43,6 +75,18 @@ def build_parser() -> argparse.ArgumentParser:
     analyze_parser.add_argument("--domain", required=True)
     analyze_parser.add_argument("--output", required=True)
     analyze_parser.set_defaults(handler=analyze)
+    backend_parser = subparsers.add_parser("backend", help="Run the V2 backend pipeline")
+    backend_parser.add_argument("--input", required=True)
+    backend_parser.add_argument("--mapping-docs")
+    backend_parser.add_argument("--target-metadata", required=True)
+    backend_parser.add_argument("--domain", required=True)
+    backend_parser.add_argument("--output", required=True)
+    backend_parser.add_argument("--run-id", default="local-run")
+    backend_parser.add_argument("--source-base-uri")
+    backend_parser.set_defaults(handler=backend)
+    corpus_parser = subparsers.add_parser("generate-corpus", help="Generate the V2 Tableau test corpus")
+    corpus_parser.add_argument("--output", required=True)
+    corpus_parser.set_defaults(handler=generate_test_corpus)
     return parser
 
 

@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import hashlib
+import re
+
 
 class _UnionFind:
     def __init__(self, values: list[str]):
@@ -17,21 +20,84 @@ class _UnionFind:
             self.parent[right_root] = left_root
 
 
+def _normalized_table(table: str) -> str:
+    return re.sub(r"[^a-z0-9]+", ".", table.lower()).strip(".")
+
+
+def _is_generic_extract_table(table: str) -> bool:
+    return _normalized_table(table) in {"extract.extract", "data.engine.extract"}
+
+
+def _has_connection_identity(datasource: dict) -> bool:
+    return any(
+        connection.get(key)
+        for connection in datasource.get("connections", [])
+        for key in ("server", "dbname", "schema")
+    )
+
+
+def _is_local_datasource(datasource: dict) -> bool:
+    local_classes = {"excel-direct", "textscan", "hyper"}
+    return any(connection.get("class") in local_classes for connection in datasource.get("connections", []))
+
+
 def _dependencies(asset: dict) -> set[str]:
     dependencies = set()
     for datasource in asset.get("datasources", []):
-        dependencies.add(f"datasource:{datasource['fingerprint']}")
-        dependencies.update(f"table:{table.lower()}" for table in datasource.get("tables", []))
+        meaningful_tables = [
+            table for table in datasource.get("tables", []) if not _is_generic_extract_table(table)
+        ]
+        if meaningful_tables or _has_connection_identity(datasource):
+            dependencies.add(f"datasource:{datasource['fingerprint']}")
+        if not _is_local_datasource(datasource):
+            dependencies.update(f"table:{table.lower()}" for table in meaningful_tables)
     return dependencies
+
+
+def _physical_fields(asset: dict) -> set[str]:
+    return {
+        re.sub(r"[^a-z0-9]+", " ", str(field.get("caption") or field.get("name")).lower()).strip()
+        for datasource in asset.get("datasources", [])
+        if _is_local_datasource(datasource)
+        for field in datasource.get("fields", [])
+        if (field.get("caption") or field.get("name")) and not field.get("calculation")
+    }
+
+
+def _schema_similarity(left: dict, right: dict) -> dict | None:
+    left_fields = _physical_fields(left)
+    right_fields = _physical_fields(right)
+    if not left_fields or not right_fields:
+        return None
+    shared = left_fields & right_fields
+    jaccard = len(shared) / len(left_fields | right_fields)
+    containment = len(shared) / min(len(left_fields), len(right_fields))
+    if len(shared) < 12 or jaccard < 0.45 or containment < 0.65:
+        return None
+    return {
+        "left": left["asset_id"],
+        "right": right["asset_id"],
+        "shared_field_count": len(shared),
+        "jaccard": round(jaccard, 3),
+        "containment": round(containment, 3),
+        "shared_fields": sorted(shared),
+    }
 
 
 def group_assets(assets: list[dict]) -> list[dict]:
     asset_ids = [asset["asset_id"] for asset in assets]
     union_find = _UnionFind(asset_ids)
+    assets_by_id = {asset["asset_id"]: asset for asset in assets}
     dependencies = {asset["asset_id"]: _dependencies(asset) for asset in assets}
+    similarity_edges = []
     for index, left in enumerate(asset_ids):
         for right in asset_ids[index + 1 :]:
             if dependencies[left] & dependencies[right]:
+                union_find.union(left, right)
+                continue
+            similarity = _schema_similarity(assets_by_id[left], assets_by_id[right])
+            if similarity:
+                similarity_edges.append(similarity)
                 union_find.union(left, right)
 
     grouped: dict[str, list[str]] = {}
@@ -41,11 +107,20 @@ def group_assets(assets: list[dict]) -> list[dict]:
     results = []
     for number, members in enumerate(sorted(grouped.values(), key=lambda item: item[0]), start=1):
         shared = set.intersection(*(dependencies[member] for member in members)) if len(members) > 1 else set()
+        all_dependencies = sorted(set.union(*(dependencies[member] for member in members)))
+        signature_source = "|".join([*sorted(members), *all_dependencies])
         results.append(
             {
                 "group_id": f"group-{number:03d}",
                 "assets": sorted(members),
                 "shared_dependencies": sorted(shared),
+                "dependencies": all_dependencies,
+                "similarity_edges": [
+                    edge
+                    for edge in similarity_edges
+                    if edge["left"] in members and edge["right"] in members
+                ],
+                "coverage_signature": hashlib.sha256(signature_source.encode()).hexdigest()[:16],
             }
         )
     return results

@@ -1,0 +1,302 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import json
+import subprocess
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[1]
+JOB_PARAMETERS = [
+    {"name": "run_id", "default": ""},
+    {"name": "group_id", "default": ""},
+    {"name": "group_run_path", "default": ""},
+    {"name": "requested_by", "default": ""},
+]
+ENVIRONMENTS = [
+    {
+        "environment_key": "semantic",
+        "spec": {
+            "environment_version": "4",
+            "dependencies": ["databricks-sdk>=0.102.0", "PyYAML>=6.0"],
+        },
+    }
+]
+
+
+def run_cli(profile: str, *arguments: str) -> str:
+    command = ["databricks", *arguments, "--profile", profile]
+    result = subprocess.run(command, cwd=ROOT, capture_output=True, text=True)
+    if result.returncode:
+        detail = result.stderr.strip() or result.stdout.strip() or "Unknown Databricks CLI error"
+        raise RuntimeError(f"Databricks command failed: {' '.join(command[:3])}: {detail}")
+    return result.stdout
+
+
+def run_json(profile: str, *arguments: str) -> dict:
+    output = run_cli(profile, *arguments, "-o", "json")
+    return json.loads(output or "{}")
+
+
+def notebook_task(task_key: str, notebook_path: str, parameters: dict[str, str], **extra: object) -> dict:
+    return {
+        "task_key": task_key,
+        "notebook_task": {
+            "notebook_path": notebook_path,
+            "source": "WORKSPACE",
+            "base_parameters": parameters,
+        },
+        "environment_key": "semantic",
+        "run_if": "ALL_SUCCESS",
+        "timeout_seconds": 0,
+        **extra,
+    }
+
+
+def placeholder_task(task_key: str, notebook_path: str, **extra: object) -> dict:
+    return notebook_task(task_key, notebook_path, {}, **extra)
+
+
+def common_settings(name: str, tasks: list[dict]) -> dict:
+    return {
+        "name": name,
+        "edit_mode": "EDITABLE",
+        "format": "MULTI_TASK",
+        "max_concurrent_runs": 10,
+        "timeout_seconds": 0,
+        "performance_target": "PERFORMANCE_OPTIMIZED",
+        "queue": {"enabled": True},
+        "parameters": JOB_PARAMETERS,
+        "environments": ENVIRONMENTS,
+        "tags": {"aidevkit_project": "ai-dev-kit", "managed_by": "scripts/deploy.py"},
+        "tasks": tasks,
+    }
+
+
+def existing_job(profile: str, name: str) -> dict | None:
+    response = run_json(profile, "jobs", "list", "--name", name, "--expand-tasks")
+    jobs = response if isinstance(response, list) else response.get("jobs", [])
+    exact = [job for job in jobs if job.get("settings", {}).get("name", "").casefold() == name.casefold()]
+    if len(exact) > 1:
+        raise RuntimeError(f"Multiple Jobs are named {name!r}; remove duplicates before deploying.")
+    return exact[0] if exact else None
+
+
+def deploy_job(
+    profile: str,
+    name: str,
+    create_tasks: list[dict],
+    update_tasks: list[dict],
+    existing: dict | None,
+    dry_run: bool,
+    fields_to_remove: list[str] | None = None,
+) -> int:
+    settings = common_settings(name, update_tasks if existing else create_tasks)
+    if dry_run:
+        print(
+            json.dumps(
+                {
+                    "operation": "UPDATE" if existing else "CREATE",
+                    "job_id": existing.get("job_id") if existing else None,
+                    "new_settings": settings,
+                    "fields_to_remove": fields_to_remove or [],
+                },
+                indent=2,
+            )
+        )
+        return int(existing.get("job_id", 0)) if existing else 0
+    if existing:
+        job_id = int(existing["job_id"])
+        run_cli(
+            profile,
+            "jobs",
+            "update",
+            "--json",
+            json.dumps(
+                {
+                    "job_id": job_id,
+                    "new_settings": settings,
+                    "fields_to_remove": fields_to_remove or [],
+                }
+            ),
+        )
+        return job_id
+    return int(run_json(profile, "jobs", "create", "--json", json.dumps(settings))["job_id"])
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Deploy BI migration Jobs, bundle resources, and Databricks App.")
+    parser.add_argument("--profile", default="DEFAULT")
+    parser.add_argument("--target", default="default")
+    parser.add_argument("--app-name", default="bi-migration-review")
+    parser.add_argument("--component", choices=("all", "jobs", "app"), default="all")
+    parser.add_argument("--dry-run", action="store_true")
+    args = parser.parse_args()
+
+    current_user = run_json(args.profile, "current-user", "me")["userName"]
+    bundle_root = f"/Workspace/Users/{current_user}/.bundle/bi-migration-review/{args.target}/files"
+    notebooks = f"{bundle_root}/notebooks"
+    dashboard_name = f"[{args.target}] BI migration dashboard import"
+    semantic_name = f"[{args.target}] BI migration semantic build"
+    dashboard_existing = existing_job(args.profile, dashboard_name)
+    semantic_existing = existing_job(args.profile, semantic_name)
+
+    nested_import = {
+        "task_key": "import_dashboard",
+        "notebook_task": {
+            "notebook_path": f"{notebooks}/genie_task_not_configured",
+            "source": "WORKSPACE",
+        },
+        "environment_key": "semantic",
+        "timeout_seconds": 7200,
+    }
+    import_dashboards = {
+        "task_key": "import_dashboards",
+        "depends_on": [{"task_key": "prepare_import"}],
+        "for_each_task": {
+            "inputs": "{{tasks.prepare_import.values.workbooks}}",
+            "concurrency": 10,
+            "task": nested_import,
+        },
+        "run_if": "ALL_SUCCESS",
+        "timeout_seconds": 0,
+    }
+    dashboard_tasks = [
+        notebook_task(
+            "prepare_import",
+            f"{notebooks}/freeze_group_package",
+            {
+                "run_id": "{{job.parameters.run_id}}",
+                "group_id": "{{job.parameters.group_id}}",
+                "group_run_path": "{{job.parameters.group_run_path}}",
+                "requested_by": "{{job.parameters.requested_by}}",
+            },
+        ),
+        import_dashboards,
+        notebook_task(
+            "reconcile_dashboards",
+            f"{notebooks}/reconcile_dashboard_import",
+            {
+                "run_id": "{{job.parameters.run_id}}",
+                "group_run_path": "{{job.parameters.group_run_path}}",
+            },
+            depends_on=[{"task_key": "import_dashboards"}],
+            run_if="ALL_DONE",
+        ),
+    ]
+
+    build_metric_view = placeholder_task(
+        "build_metric_view",
+        f"{notebooks}/genie_task_not_configured",
+        depends_on=[{"task_key": "semantic_preflight"}],
+        timeout_seconds=3600,
+    )
+    build_genie_agent = placeholder_task(
+        "build_genie_agent",
+        f"{notebooks}/genie_task_not_configured",
+        depends_on=[{"task_key": "validate_metric_view"}],
+        timeout_seconds=3600,
+    )
+    semantic_tasks = [
+        notebook_task(
+            "semantic_preflight",
+            f"{notebooks}/semantic_preflight",
+            {
+                "run_id": "{{job.parameters.run_id}}",
+                "group_run_path": "{{job.parameters.group_run_path}}",
+            },
+        ),
+        build_metric_view,
+        notebook_task(
+            "validate_metric_view",
+            f"{notebooks}/validate_metric_view",
+            {
+                "run_id": "{{job.parameters.run_id}}",
+                "group_run_path": "{{job.parameters.group_run_path}}",
+            },
+            depends_on=[{"task_key": "build_metric_view"}],
+        ),
+        build_genie_agent,
+        notebook_task(
+            "audit_semantic_assets",
+            f"{notebooks}/audit_semantic_workflow",
+            {
+                "run_id": "{{job.parameters.run_id}}",
+                "group_run_path": "{{job.parameters.group_run_path}}",
+            },
+            depends_on=[{"task_key": "validate_metric_view"}, {"task_key": "build_genie_agent"}],
+            run_if="ALL_DONE",
+        ),
+    ]
+
+    if args.component in {"all", "jobs"}:
+        dashboard_job_id = deploy_job(
+            args.profile,
+            dashboard_name,
+            dashboard_tasks,
+            [dashboard_tasks[0], dashboard_tasks[2]],
+            dashboard_existing,
+            args.dry_run,
+        )
+        semantic_job_id = deploy_job(
+            args.profile,
+            semantic_name,
+            semantic_tasks,
+            [semantic_tasks[0], semantic_tasks[2], semantic_tasks[4]],
+            semantic_existing,
+            args.dry_run,
+            ["tasks/audit_semantic_assets/depends_on"],
+        )
+    else:
+        if not dashboard_existing or not semantic_existing:
+            raise RuntimeError("Deploy the Jobs before deploying the App in a new workspace.")
+        dashboard_job_id = int(dashboard_existing["job_id"])
+        semantic_job_id = int(semantic_existing["job_id"])
+    if args.dry_run:
+        if args.component == "app":
+            print(
+                json.dumps(
+                    {
+                        "operation": "DEPLOY_APP",
+                        "app_name": args.app_name,
+                        "dashboard_import_job_id": dashboard_job_id,
+                        "semantic_build_job_id": semantic_job_id,
+                    },
+                    indent=2,
+                )
+            )
+        return
+
+    deployed = {
+        "dashboard_import_job_id": dashboard_job_id,
+        "semantic_build_job_id": semantic_job_id,
+    }
+    if args.component == "jobs":
+        print(json.dumps(deployed, indent=2))
+        return
+
+    run_cli(
+        args.profile,
+        "bundle",
+        "deploy",
+        "-t",
+        args.target,
+        "--var",
+        f"dashboard_import_job_id={dashboard_job_id}",
+        "--var",
+        f"semantic_build_job_id={semantic_job_id}",
+    )
+    run_cli(
+        args.profile,
+        "apps",
+        "deploy",
+        args.app_name,
+        "--source-code-path",
+        f"{bundle_root}/app/bi-migration-review",
+    )
+    print(json.dumps(deployed, indent=2))
+
+
+if __name__ == "__main__":
+    main()

@@ -4,3 +4,12 @@ __pycache__/
 *.py[cod]
 build/
 dist/
+
+# Downloaded BI sample binaries stay local or in a governed UC Volume.
+samples/**
+!samples/**/
+!samples/**/README.md
+!samples/**/manifest.csv
+
+V1_PLAN.md
+V2_PLAN.md
