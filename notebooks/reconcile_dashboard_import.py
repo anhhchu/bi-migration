@@ -23,20 +23,28 @@ results = []
 missing = []
 
 for workbook in workbooks:
-    tag = f"[bi-migration:{run_id}:{group_run_path.name}:{workbook['workbook_id']}]"
-    matches = [dashboard for dashboard in dashboards if tag in (dashboard.display_name or "")]
+    run_tag = f"[bi-migration:{run_id}:{group_run_path.name}:{workbook['workbook_id']}]"
+    candidate_tags = list(dict.fromkeys([run_tag, workbook.get("dashboard_tag", "")]))
+    candidate_tags = [tag for tag in candidate_tags if tag]
+    matched_by_id = {
+        dashboard.dashboard_id: dashboard
+        for dashboard in dashboards
+        if any(tag in (dashboard.display_name or "") for tag in candidate_tags)
+    }
+    matches = list(matched_by_id.values())
     output_path = Path(workbook["output_path"])
     output_path.mkdir(parents=True, exist_ok=True)
     if len(matches) != 1:
         missing.append({
             "workbook_id": workbook["workbook_id"],
             "workbook_name": workbook["workbook_name"],
-            "dashboard_tag": tag,
+            "dashboard_tags": candidate_tags,
             "match_count": len(matches),
         })
         continue
 
     dashboard = client.lakeview.get(matches[0].dashboard_id)
+    tag = next(tag for tag in candidate_tags if tag in (dashboard.display_name or ""))
     serialized = dashboard.serialized_dashboard or "{}"
     definition = json.loads(serialized)
     config_path = output_path / "dashboard-config.json"
