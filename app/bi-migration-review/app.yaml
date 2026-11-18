@@ -1,0 +1,14 @@
+command: ['npm', 'run', 'start']
+env:
+  - name: DATABRICKS_WORKSPACE_URL
+    value: https://fevm-serverless-stable-dvmvgw.cloud.databricks.com
+  - name: DATABRICKS_VOLUME_FILES
+    valueFrom: files
+  - name: DATABRICKS_JOB_ID
+    valueFrom: inventory-job
+  - name: DATABRICKS_JOB_INVENTORY
+    valueFrom: inventory-job
+  - name: DATABRICKS_JOB_SEMANTIC
+    valueFrom: semantic-job
+  - name: DATABRICKS_JOB_DASHBOARD_IMPORT
+    valueFrom: dashboard-import-job
