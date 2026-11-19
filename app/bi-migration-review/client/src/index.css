@@ -1606,6 +1606,10 @@ button,
   grid-column: 2;
   margin: 0;
 }
+.benchmark-findings article small {
+  grid-column: 2;
+  color: var(--db-text-secondary);
+}
 
 @media (max-width: 72rem) {
   .app-body {

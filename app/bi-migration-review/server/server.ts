@@ -102,6 +102,7 @@ const JOB_TASK_PROMPTS = {
     '- A Databricks-generated timestamp elsewhere in the display name is acceptable; do not spend time removing it.',
     '- Record unsupported features, degraded behavior, and validation gaps.',
     '- Do not invent missing data, joins, calculations, or mappings.',
+    '- Write `{{input.output_path}}/migration-findings.json` with `{ "findings": [{ "severity": "high|medium|low|info", "type": "...", "detail": "...", "resolution": "..." }] }`. Write an empty findings array when no gaps remain.',
   ].join('\n'),
   buildMetricView: [
     '# Genie Code — Build and validate a governed Metric View',
@@ -1285,10 +1286,11 @@ await createApp({
           const groupRunPath = await groupWorkspacePath(request, activeVolumeRoot, groupId);
           const semanticPath = `${groupRunPath}/semantic`;
           const readJson = async (path: string) => JSON.parse(await volume.read(path)) as Record<string, unknown>;
-          const [manifest, dashboardSummary, metricView, agent, audit, promotion] = await Promise.all([
+          const [manifest, dashboardSummary, metricView, metricExceptions, agent, audit, promotion] = await Promise.all([
             readJson(`${groupRunPath}/group-migration-manifest.json`),
             readJson(`${groupRunPath}/import/summary.json`),
             readJson(`${semanticPath}/metric-view-result.json`),
+            readJson(`${semanticPath}/metric-view-exceptions.json`).catch(() => ({ exceptions: [] })),
             readJson(`${semanticPath}/genie-agent-result.json`),
             readJson(`${semanticPath}/semantic-audit.json`),
             readJson(`${semanticPath}/promotion.json`).catch(() => null),
@@ -1307,6 +1309,7 @@ await createApp({
             manifest,
             dashboardSummary: { ...dashboardSummary, dashboards },
             metricView,
+            metricExceptions,
             agent,
             audit,
             promotion,

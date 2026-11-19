@@ -62,6 +62,9 @@ for workbook in workbooks:
         "status": "VALID" if definition.get("datasets") and definition.get("pages") else "INVALID",
         "reconciled_at": datetime.now(timezone.utc).isoformat(),
     }
+    findings_path = output_path / "migration-findings.json"
+    findings_document = json.loads(findings_path.read_text(encoding="utf-8")) if findings_path.exists() else {}
+    result["findings"] = findings_document.get("findings", [])
     (output_path / "result.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
     results.append(result)
 
@@ -71,6 +74,11 @@ summary = {
     "expected_workbooks": len(workbooks),
     "validated_dashboards": len(results),
     "dashboards": results,
+    "findings": [
+        {**finding, "stage": "dashboard_import", "workbook_name": result["workbook_name"]}
+        for result in results
+        for finding in result.get("findings", [])
+    ],
     "missing_or_ambiguous": missing,
     "reconciled_at": datetime.now(timezone.utc).isoformat(),
 }
