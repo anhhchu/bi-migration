@@ -1577,6 +1577,35 @@ button,
 .promotion-form textarea {
   resize: vertical;
 }
+.semantic-dashboard-links {
+  display: grid;
+  gap: var(--db-space-sm);
+  margin-block-start: var(--db-space-md);
+}
+.semantic-dashboard-links .job-run-link {
+  justify-content: space-between;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+.benchmark-findings {
+  display: grid;
+  gap: var(--db-space-sm);
+  margin-block-start: var(--db-space-md);
+}
+.benchmark-findings article {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: var(--db-space-xs) var(--db-space-sm);
+  align-items: center;
+  padding: var(--db-space-sm);
+  border: 0.0625rem solid var(--db-border);
+  border-radius: var(--db-radius-sm);
+  background: var(--db-background-secondary);
+}
+.benchmark-findings article p {
+  grid-column: 2;
+  margin: 0;
+}
 
 @media (max-width: 72rem) {
   .app-body {

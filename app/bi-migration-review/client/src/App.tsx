@@ -184,11 +184,15 @@ type SemanticWorkflowRun = {
 
 type SemanticResults = {
   manifest: { candidate_metric_view_fqn?: string; genie_agent_name?: string };
+  dashboardSummary: {
+    status?: string;
+    dashboards?: Array<{ dashboard_id?: string; display_name?: string; workbook_name?: string; url?: string | null }>;
+  };
   metricView: { status?: string; metric_view_fqn?: string; dimension_count?: number; measure_count?: number };
   agent: {
     status?: string;
     genie_agent?: { name?: string; space_id?: string; url_path?: string };
-    benchmark_configuration?: Array<unknown>;
+    benchmark_configuration?: Array<{ benchmark_key?: string; question?: string }>;
     benchmark_summary?: {
       num_questions?: number;
       num_correct?: number;
@@ -199,6 +203,7 @@ type SemanticResults = {
     exceptions?: Array<{ id?: string; detail?: string }>;
   };
   audit: { status?: string; warnings?: string[]; missing?: string[] };
+  links?: { metricView?: string | null; genieAgent?: string | null };
   promotion?: {
     status?: string;
     final_metric_view_fqn?: string;
@@ -303,6 +308,26 @@ const issueLabels: Record<string, string> = {
   inventory_errors: 'Inventory errors detected',
   mapping_document_errors: 'Mapping documents quarantined',
 };
+
+function benchmarkFinding(
+  exception: { id?: string; detail?: string },
+  benchmarks: Array<{ benchmark_key?: string; question?: string }>
+) {
+  const key = exception.id?.replace(/^BF-/, '') ?? 'Benchmark';
+  const source = exception.detail ?? '';
+  const benchmark = benchmarks.find((candidate) => candidate.benchmark_key === key);
+  const explanations = [
+    source.includes('MISSING_OR_INCORRECT_FILTER') ? 'The answer may not have applied every requested filter.' : '',
+    source.includes('RESULT_MISSING_COLUMNS') ? 'The result omitted one or more expected columns.' : '',
+    source.includes('INCOMPLETE_OR_PARTIAL_OUTPUT') ? 'The answer was incomplete or only partially addressed the question.' : '',
+  ].filter(Boolean);
+  return {
+    key,
+    question: benchmark?.question ?? key,
+    status: source.includes('NEEDS_REVIEW') ? 'Needs review' : 'Failed',
+    explanation: explanations.join(' ') || 'The benchmark result did not meet its expected answer criteria.',
+  };
+}
 
 export default function App() {
   const [view, setView] = useState<'upload' | 'review'>(() =>
@@ -1750,12 +1775,14 @@ function MappingWorkspace({ group, detail, onBack }: { group: GroupSummary; deta
                   <h4>Metric View</h4>
                   <code>{semanticResults.metricView.metric_view_fqn ?? semanticResults.manifest.candidate_metric_view_fqn}</code>
                   <p>{semanticResults.metricView.measure_count ?? '—'} measures · {semanticResults.metricView.dimension_count ?? '—'} dimensions</p>
+                  {semanticResults.links?.metricView ? <a className="job-run-link" href={semanticResults.links.metricView} target="_blank" rel="noreferrer">Open Metric View <ExternalLink aria-hidden="true" /></a> : null}
                 </section>
                 <section className="workflow-job">
                   <Badge variant="outline">{semanticResults.agent.status ?? 'UNKNOWN'}</Badge>
                   <h4>Genie Agent</h4>
                   <strong>{semanticResults.agent.genie_agent?.name}</strong>
                   <p>Space ID: <code>{semanticResults.agent.genie_agent?.space_id}</code></p>
+                  {semanticResults.links?.genieAgent ? <a className="job-run-link" href={semanticResults.links.genieAgent} target="_blank" rel="noreferrer">Open Genie Agent <ExternalLink aria-hidden="true" /></a> : null}
                 </section>
                 <section className="workflow-job">
                   <Badge variant="outline">{semanticResults.audit.status ?? 'UNKNOWN'}</Badge>
@@ -1764,13 +1791,36 @@ function MappingWorkspace({ group, detail, onBack }: { group: GroupSummary; deta
                   <p>{semanticResults.agent.benchmark_summary?.num_needs_review ?? 0} need review · {semanticResults.agent.benchmark_summary?.num_bad ?? 0} failed</p>
                 </section>
               </div>
-              {(semanticResults.audit.warnings?.length || semanticResults.agent.exceptions?.length) ? (
+              <section className="workflow-job">
+                <div className="section-heading">
+                  <div><h4>Migrated dashboards</h4><p>Open each reconciled AI/BI dashboard in the workspace.</p></div>
+                  <Badge variant="outline">{semanticResults.dashboardSummary.dashboards?.length ?? 0}</Badge>
+                </div>
+                <div className="semantic-dashboard-links">
+                  {semanticResults.dashboardSummary.dashboards?.map((dashboard) => (
+                    <a className="job-run-link" href={dashboard.url ?? undefined} target="_blank" rel="noreferrer" key={dashboard.dashboard_id}>
+                      {dashboard.display_name ?? dashboard.workbook_name ?? dashboard.dashboard_id}
+                      <ExternalLink aria-hidden="true" />
+                    </a>
+                  ))}
+                </div>
+              </section>
+              {semanticResults.agent.exceptions?.some((exception) => exception.id?.startsWith('BF-')) ? (
                 <section className="workflow-job">
-                  <h4>Review findings</h4>
-                  <ul>
-                    {semanticResults.audit.warnings?.map((warning) => <li key={warning}>{warning}</li>)}
-                    {semanticResults.agent.exceptions?.map((exception) => <li key={exception.id ?? exception.detail}>{exception.id ? `${exception.id}: ` : ''}{exception.detail}</li>)}
-                  </ul>
+                  <h4>Questions to review</h4>
+                  <p>These benchmark answers need attention before production promotion.</p>
+                  <div className="benchmark-findings">
+                    {semanticResults.agent.exceptions
+                      .filter((exception) => exception.id?.startsWith('BF-'))
+                      .map((exception) => benchmarkFinding(exception, semanticResults.agent.benchmark_configuration ?? []))
+                      .map((finding) => (
+                        <article key={finding.key}>
+                          <Badge variant="outline">{finding.status}</Badge>
+                          <strong>{finding.question}</strong>
+                          <p>{finding.explanation}</p>
+                        </article>
+                      ))}
+                  </div>
                 </section>
               ) : null}
               <div className="workflow-job-actions">
