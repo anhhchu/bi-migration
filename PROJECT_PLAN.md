@@ -509,6 +509,18 @@ Required Session 1 artifacts:
 5. Benchmark questions are registered with the Genie Agent for evaluation. They remain distinct from visible sample questions and ordinary conversational context, but they are part of the Agent's governed configuration and audit evidence.
 6. A final audit task runs with `ALL_DONE`, verifies the validated Metric View, Genie Agent data source, sample questions, benchmark registration, and lineage, then writes a complete or incomplete audit result for the App.
 
+### Targeted remediation loop
+
+Review findings must not trigger a full `/importBI` rerun by default. The App records a versioned remediation plan with one disposition per gap: `fix_now`, `accept`, `defer`, or `not_applicable`.
+
+- Mapping-relevant gaps create a new contract revision; approved contracts are never overwritten in place.
+- Dashboard repairs reference the existing dashboard ID and explicitly update it in place without invoking `/importBI` or creating another dashboard.
+- Metric View repairs update only the candidate Metric View, then rerun deterministic Metric View validation.
+- Genie Agent repairs update only the existing Space instructions, datasource, examples, or benchmark configuration.
+- A full workbook re-import is reserved for irreparable structural conversion failures.
+
+The remediation package is stored under `semantic/remediation/` and contains the decision record plus stage-specific Genie Code prompts. Every prompt includes gap IDs, affected asset IDs, current artifact paths, and a prohibition against creating replacement assets unless the reviewer explicitly requests it. Promotion remains blocked only by unresolved high-severity gaps; accepted gaps require reviewer rationale.
+
 Required Semantic Build artifacts:
 
 - `semantic-preflight.json`

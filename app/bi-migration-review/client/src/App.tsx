@@ -1172,6 +1172,13 @@ function MappingWorkspace({ group, detail, onBack }: { group: GroupSummary; deta
   const [finalAgentName, setFinalAgentName] = useState('');
   const [promotionNotes, setPromotionNotes] = useState('');
   const [promotionBusy, setPromotionBusy] = useState(false);
+  const [gapDecisions, setGapDecisions] = useState<Record<string, { disposition: 'fix_now' | 'accept' | 'defer' | 'not_applicable'; notes: string }>>({});
+  const [remediationBusy, setRemediationBusy] = useState(false);
+  const [remediationPackage, setRemediationPackage] = useState<{
+    dashboardPrompt: string;
+    metricPrompt: string;
+    agentPrompt: string;
+  } | null>(null);
   const groupedFields = useMemo(() => {
     const groups = new Map<MappingStatus, GroupDetail['mappingContract']['fields']>();
     for (const status of ['unavailable', 'unmapped', 'imported', 'suggested', 'draft', 'approved'] as const) {
@@ -1224,6 +1231,20 @@ function MappingWorkspace({ group, detail, onBack }: { group: GroupSummary; deta
     return [...dashboardGaps, ...metricGaps, ...agentGaps];
   }, [semanticResults]);
 
+  useEffect(() => {
+    if (!migrationGaps.length) return;
+    setGapDecisions((current) => {
+      const next = { ...current };
+      for (const gap of migrationGaps) {
+        next[gap.key] ??= {
+          disposition: gap.severity === 'high' || gap.severity === 'medium' ? 'fix_now' : 'defer',
+          notes: '',
+        };
+      }
+      return next;
+    });
+  }, [migrationGaps]);
+
   const loadSemanticRun = async () => {
     const response = await fetch(`/api/groups/${group.group_id}/semantic-run`);
     if (!response.ok) return;
@@ -1271,6 +1292,48 @@ function MappingWorkspace({ group, detail, onBack }: { group: GroupSummary; deta
       setSemanticResultsError(error instanceof Error ? error.message : 'Promotion decision could not be saved.');
     } finally {
       setPromotionBusy(false);
+    }
+  };
+
+  const prepareRemediation = async () => {
+    setRemediationBusy(true);
+    setSemanticResultsError(null);
+    try {
+      const decisions = migrationGaps.map((gap) => ({
+        gapKey: gap.key,
+        stage: gap.stage,
+        severity: gap.severity,
+        type: gap.type,
+        detail: gap.detail,
+        resolution: gap.resolution,
+        asset: gap.asset,
+        disposition: gapDecisions[gap.key]?.disposition ?? 'defer',
+        notes: gapDecisions[gap.key]?.notes ?? '',
+      }));
+      const response = await fetch(`/api/groups/${group.group_id}/remediation`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ decisions }),
+      });
+      const payload = (await response.json()) as {
+        dashboardPrompt?: string;
+        metricPrompt?: string;
+        agentPrompt?: string;
+        error?: string;
+        detail?: string;
+      };
+      if (!response.ok || !payload.dashboardPrompt || !payload.metricPrompt || !payload.agentPrompt) {
+        throw new Error([payload.error, payload.detail].filter(Boolean).join(' ') || 'Remediation package is incomplete.');
+      }
+      setRemediationPackage({
+        dashboardPrompt: payload.dashboardPrompt,
+        metricPrompt: payload.metricPrompt,
+        agentPrompt: payload.agentPrompt,
+      });
+    } catch (error) {
+      setSemanticResultsError(error instanceof Error ? error.message : 'Remediation package could not be created.');
+    } finally {
+      setRemediationBusy(false);
     }
   };
 
@@ -1833,9 +1896,57 @@ function MappingWorkspace({ group, detail, onBack }: { group: GroupSummary; deta
                           <strong>{gap.stage}: {gap.type.replaceAll('_', ' ')}</strong>
                           <p>{gap.asset ? `${gap.asset}: ` : ''}{gap.detail}</p>
                           {gap.resolution ? <small>Resolution: {gap.resolution}</small> : null}
+                          <div className="gap-decision">
+                            <label>
+                              <span>Disposition</span>
+                              <select
+                                value={gapDecisions[gap.key]?.disposition ?? 'defer'}
+                                onChange={(event) => setGapDecisions((current) => ({
+                                  ...current,
+                                  [gap.key]: {
+                                    notes: current[gap.key]?.notes ?? '',
+                                    disposition: event.target.value as 'fix_now' | 'accept' | 'defer' | 'not_applicable',
+                                  },
+                                }))}
+                              >
+                                <option value="fix_now">Fix now</option>
+                                <option value="accept">Accept limitation</option>
+                                <option value="defer">Defer</option>
+                                <option value="not_applicable">Not applicable</option>
+                              </select>
+                            </label>
+                            <label>
+                              <span>Reviewer note</span>
+                              <input
+                                value={gapDecisions[gap.key]?.notes ?? ''}
+                                onChange={(event) => setGapDecisions((current) => ({
+                                  ...current,
+                                  [gap.key]: {
+                                    disposition: current[gap.key]?.disposition ?? 'defer',
+                                    notes: event.target.value,
+                                  },
+                                }))}
+                                placeholder="Decision rationale or repair instruction"
+                              />
+                            </label>
+                          </div>
                         </article>
                       ))}
                   </div>
+                  <div className="workflow-job-actions">
+                    <Button onClick={() => void prepareRemediation()} disabled={remediationBusy}>
+                      {remediationBusy ? 'Preparing…' : 'Prepare targeted repairs'}
+                    </Button>
+                  </div>
+                </section>
+              ) : null}
+              {remediationPackage ? (
+                <section className="workflow-job">
+                  <h4>Targeted repair prompts</h4>
+                  <p>Run only the stages with approved fixes. Dashboard repair updates existing dashboard IDs and never invokes `/importBI`.</p>
+                  <JobPrompt task={{ taskKey: 'repair_dashboards', prompt: remediationPackage.dashboardPrompt }} />
+                  <JobPrompt task={{ taskKey: 'repair_metric_view', prompt: remediationPackage.metricPrompt }} />
+                  <JobPrompt task={{ taskKey: 'repair_genie_agent', prompt: remediationPackage.agentPrompt }} />
                 </section>
               ) : null}
               <div className="workflow-job-actions">

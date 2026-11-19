@@ -1610,6 +1610,28 @@ button,
   grid-column: 2;
   color: var(--db-text-secondary);
 }
+.gap-decision {
+  grid-column: 2;
+  display: grid;
+  grid-template-columns: minmax(9rem, 0.35fr) minmax(0, 1fr);
+  gap: var(--db-space-sm);
+}
+.gap-decision label {
+  display: grid;
+  gap: var(--db-space-xs);
+  font-size: 0.8125rem;
+  font-weight: 600;
+}
+.gap-decision select,
+.gap-decision input {
+  min-width: 0;
+  border: 0.0625rem solid var(--db-border);
+  border-radius: var(--db-radius-sm);
+  background: var(--db-background-primary);
+  color: var(--db-text-primary);
+  padding: 0.5rem 0.625rem;
+  font: inherit;
+}
 
 @media (max-width: 72rem) {
   .app-body {
@@ -1662,6 +1684,9 @@ button,
     grid-template-columns: 1fr;
   }
   .semantic-result-grid {
+    grid-template-columns: 1fr;
+  }
+  .gap-decision {
     grid-template-columns: 1fr;
   }
   .workflow-job-heading {
