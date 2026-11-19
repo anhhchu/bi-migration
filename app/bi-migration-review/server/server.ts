@@ -1229,7 +1229,6 @@ await createApp({
             resultState: String(task.state?.result_state ?? ''),
           }));
           const lifeCycleState = String(run.data.state?.life_cycle_state ?? 'PENDING');
-          const resultState = String(run.data.state?.result_state ?? '');
           const artifactPaths = {
             metricViewResult: `${groupRunPath}/semantic/metric-view-result.json`,
             genieAgentResult: `${groupRunPath}/semantic/genie-agent-result.json`,
@@ -1243,6 +1242,12 @@ await createApp({
               ])
             )
           );
+          const audit = await volume.read(artifactPaths.audit)
+            .then((text) => JSON.parse(text) as { status?: string })
+            .catch(() => null);
+          const resultState = audit?.status?.startsWith('COMPLETE')
+            ? 'SUCCESS'
+            : String(run.data.state?.result_state ?? '');
           const jobId = process.env.DATABRICKS_JOB_SEMANTIC;
           response.json({
             ...state,
