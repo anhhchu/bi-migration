@@ -1,6 +1,6 @@
-# BI Migration Review
+# BI Migration Blueprint
 
-BI Migration Review is a Databricks control plane for migrating Tableau workbooks at portfolio scale. It inventories `.twb` and `.twbx` files, groups related workbooks into semantic domains, compiles source-to-Databricks mapping contracts, orchestrates `/importBI`, and reviews the resulting dashboards, Unity Catalog Metric Views, Genie Agents, and migration gaps.
+BI Migration Blueprint is a Databricks control plane for migrating Tableau workbooks at portfolio scale. It inventories `.twb` and `.twbx` files, groups related workbooks into semantic domains, compiles source-to-Databricks mapping contracts, orchestrates `/importBI`, and reviews the resulting dashboards, Unity Catalog Metric Views, Genie Agents, and migration gaps.
 
 ## Workflow
 
