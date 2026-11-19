@@ -1285,14 +1285,42 @@ await createApp({
           const groupRunPath = await groupWorkspacePath(request, activeVolumeRoot, groupId);
           const semanticPath = `${groupRunPath}/semantic`;
           const readJson = async (path: string) => JSON.parse(await volume.read(path)) as Record<string, unknown>;
-          const [manifest, metricView, agent, audit, promotion] = await Promise.all([
+          const [manifest, dashboardSummary, metricView, agent, audit, promotion] = await Promise.all([
             readJson(`${groupRunPath}/group-migration-manifest.json`),
+            readJson(`${groupRunPath}/import/summary.json`),
             readJson(`${semanticPath}/metric-view-result.json`),
             readJson(`${semanticPath}/genie-agent-result.json`),
             readJson(`${semanticPath}/semantic-audit.json`),
             readJson(`${semanticPath}/promotion.json`).catch(() => null),
           ]);
-          response.json({ manifest, metricView, agent, audit, promotion });
+          const workspaceUrl = (process.env.DATABRICKS_WORKSPACE_URL || process.env.DATABRICKS_HOST)?.replace(/\/$/, '');
+          const metricViewFqn = String(metricView.metric_view_fqn ?? manifest.candidate_metric_view_fqn ?? '');
+          const metricViewParts = metricViewFqn.split('.');
+          const agentDetails = (agent.genie_agent ?? {}) as { space_id?: string; url_path?: string };
+          const dashboards = ((dashboardSummary.dashboards ?? []) as Array<Record<string, unknown>>).map((dashboard) => ({
+            ...dashboard,
+            url: workspaceUrl && dashboard.dashboard_id
+              ? `${workspaceUrl}/sql/dashboardsv3/${dashboard.dashboard_id}`
+              : null,
+          }));
+          response.json({
+            manifest,
+            dashboardSummary: { ...dashboardSummary, dashboards },
+            metricView,
+            agent,
+            audit,
+            promotion,
+            links: {
+              metricView: workspaceUrl && metricViewParts.length === 3
+                ? `${workspaceUrl}/explore/data/${metricViewParts.map(encodeURIComponent).join('/')}`
+                : null,
+              genieAgent: workspaceUrl && agentDetails.url_path
+                ? `${workspaceUrl}${agentDetails.url_path}`
+                : workspaceUrl && agentDetails.space_id
+                  ? `${workspaceUrl}/genie/rooms/${agentDetails.space_id}`
+                  : null,
+            },
+          });
         } catch (error) {
           response.status(404).json({
             error: 'Semantic results are unavailable.',
