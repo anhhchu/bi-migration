@@ -1542,6 +1542,42 @@ button,
   display: grid;
   gap: var(--db-space-md);
 }
+.semantic-result-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--db-space-md);
+}
+.semantic-result-grid .workflow-job {
+  min-width: 0;
+}
+.semantic-result-grid code {
+  display: block;
+  overflow-wrap: anywhere;
+  margin-block: var(--db-space-sm);
+}
+.promotion-form {
+  display: grid;
+  gap: var(--db-space-md);
+}
+.promotion-form label {
+  display: grid;
+  gap: var(--db-space-xs);
+  font-weight: 600;
+}
+.promotion-form input,
+.promotion-form textarea {
+  width: 100%;
+  border: 0.0625rem solid var(--db-border);
+  border-radius: var(--db-radius-sm);
+  background: var(--db-background-primary);
+  color: var(--db-text-primary);
+  padding: 0.625rem 0.75rem;
+  font: inherit;
+}
+.promotion-form textarea {
+  resize: vertical;
+}
+
 @media (max-width: 72rem) {
   .app-body {
     grid-template-columns: 11rem minmax(0, 1fr);
@@ -1590,6 +1626,9 @@ button,
     grid-template-columns: 1fr;
   }
   .group-workflow {
+    grid-template-columns: 1fr;
+  }
+  .semantic-result-grid {
     grid-template-columns: 1fr;
   }
   .workflow-job-heading {

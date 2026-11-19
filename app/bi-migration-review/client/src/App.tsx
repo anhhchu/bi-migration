@@ -182,6 +182,32 @@ type SemanticWorkflowRun = {
   artifactAvailability?: Record<string, boolean>;
 };
 
+type SemanticResults = {
+  manifest: { candidate_metric_view_fqn?: string; genie_agent_name?: string };
+  metricView: { status?: string; metric_view_fqn?: string; dimension_count?: number; measure_count?: number };
+  agent: {
+    status?: string;
+    genie_agent?: { name?: string; space_id?: string; url_path?: string };
+    benchmark_configuration?: Array<unknown>;
+    benchmark_summary?: {
+      num_questions?: number;
+      num_correct?: number;
+      num_needs_review?: number;
+      num_bad?: number;
+      failures?: string[];
+    };
+    exceptions?: Array<{ id?: string; detail?: string }>;
+  };
+  audit: { status?: string; warnings?: string[]; missing?: string[] };
+  promotion?: {
+    status?: string;
+    final_metric_view_fqn?: string;
+    final_agent_name?: string;
+    approved_by?: string;
+    approved_at?: string;
+  } | null;
+};
+
 type JobSetup = {
   instructions: string;
   jobs: Array<{
@@ -1130,6 +1156,13 @@ function MappingWorkspace({ group, detail, onBack }: { group: GroupSummary; deta
   const [dashboardRunError, setDashboardRunError] = useState<string | null>(null);
   const [semanticRunBusy, setSemanticRunBusy] = useState(false);
   const [semanticRunError, setSemanticRunError] = useState<string | null>(null);
+  const [semanticResults, setSemanticResults] = useState<SemanticResults | null>(null);
+  const [semanticResultsError, setSemanticResultsError] = useState<string | null>(null);
+  const [semanticResultsLoading, setSemanticResultsLoading] = useState(false);
+  const [finalMetricViewFqn, setFinalMetricViewFqn] = useState('');
+  const [finalAgentName, setFinalAgentName] = useState('');
+  const [promotionNotes, setPromotionNotes] = useState('');
+  const [promotionBusy, setPromotionBusy] = useState(false);
   const groupedFields = useMemo(() => {
     const groups = new Map<MappingStatus, GroupDetail['mappingContract']['fields']>();
     for (const status of ['unavailable', 'unmapped', 'imported', 'suggested', 'draft', 'approved'] as const) {
@@ -1160,6 +1193,48 @@ function MappingWorkspace({ group, detail, onBack }: { group: GroupSummary; deta
     if (!response.ok) return;
     setDashboardRun((await response.json()) as SemanticWorkflowRun);
   };
+
+  const loadSemanticResults = async () => {
+    setSemanticResultsLoading(true);
+    setSemanticResultsError(null);
+    try {
+      const response = await fetch(`/api/groups/${group.group_id}/semantic-results`);
+      const payload = (await response.json()) as SemanticResults & { error?: string; detail?: string };
+      if (!response.ok) throw new Error([payload.error, payload.detail].filter(Boolean).join(' '));
+      setSemanticResults(payload);
+      setFinalMetricViewFqn(
+        payload.promotion?.final_metric_view_fqn ?? payload.manifest.candidate_metric_view_fqn ?? ''
+      );
+      setFinalAgentName(payload.promotion?.final_agent_name ?? payload.agent.genie_agent?.name ?? payload.manifest.genie_agent_name ?? '');
+    } catch (error) {
+      setSemanticResultsError(error instanceof Error ? error.message : 'Semantic results could not be loaded.');
+    } finally {
+      setSemanticResultsLoading(false);
+    }
+  };
+
+  const savePromotion = async () => {
+    setPromotionBusy(true);
+    setSemanticResultsError(null);
+    try {
+      const response = await fetch(`/api/groups/${group.group_id}/promotion`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ finalMetricViewFqn, finalAgentName, notes: promotionNotes }),
+      });
+      const payload = (await response.json()) as SemanticResults['promotion'] & { error?: string; detail?: string };
+      if (!response.ok) throw new Error([payload.error, payload.detail].filter(Boolean).join(' '));
+      setSemanticResults((current) => current ? { ...current, promotion: payload } : current);
+    } catch (error) {
+      setSemanticResultsError(error instanceof Error ? error.message : 'Promotion decision could not be saved.');
+    } finally {
+      setPromotionBusy(false);
+    }
+  };
+
+  useEffect(() => {
+    if (groupStage === 'validate' || groupStage === 'promote') void loadSemanticResults();
+  }, [groupStage, group.group_id]);
 
   useEffect(() => {
     if (approvalStatus !== 'approved') return;
@@ -1376,8 +1451,8 @@ function MappingWorkspace({ group, detail, onBack }: { group: GroupSummary; deta
           {[
             { id: 'mappings' as const, number: 3, label: 'Review mappings', disabled: false },
             { id: 'build' as const, number: 4, label: 'Build assets', disabled: false },
-            { id: 'validate' as const, number: 5, label: 'Validate', disabled: true },
-            { id: 'promote' as const, number: 6, label: 'Promote', disabled: true },
+            { id: 'validate' as const, number: 5, label: 'Review results', disabled: semanticRun?.resultState !== 'SUCCESS' },
+            { id: 'promote' as const, number: 6, label: 'Promote', disabled: !semanticResults?.audit.status?.startsWith('COMPLETE') },
           ].map((stage) => (
             <button
               className={groupStage === stage.id ? 'group-workflow__step group-workflow__step--active' : 'group-workflow__step'}
@@ -1652,6 +1727,98 @@ function MappingWorkspace({ group, detail, onBack }: { group: GroupSummary; deta
           ) : (
             <p className="workflow-job-empty">Complete Dashboard Import successfully to unlock this job.</p>
           )}
+          </section>
+        </section>
+        <section className="build-assets-stage" hidden={groupStage !== 'validate'}>
+          <div className="build-stage-intro">
+            <h3>Review generated assets</h3>
+            <p>Confirm the governed Metric View, Genie Agent, and benchmark evidence before promotion.</p>
+          </div>
+          {semanticResultsLoading ? <Progress value={65} /> : null}
+          {semanticResultsError ? (
+            <Alert variant="destructive">
+              <AlertCircle className="size-4" />
+              <AlertTitle>Results unavailable</AlertTitle>
+              <AlertDescription>{semanticResultsError}</AlertDescription>
+            </Alert>
+          ) : null}
+          {semanticResults ? (
+            <>
+              <div className="semantic-result-grid">
+                <section className="workflow-job">
+                  <Badge variant="outline">{semanticResults.metricView.status ?? 'UNKNOWN'}</Badge>
+                  <h4>Metric View</h4>
+                  <code>{semanticResults.metricView.metric_view_fqn ?? semanticResults.manifest.candidate_metric_view_fqn}</code>
+                  <p>{semanticResults.metricView.measure_count ?? '—'} measures · {semanticResults.metricView.dimension_count ?? '—'} dimensions</p>
+                </section>
+                <section className="workflow-job">
+                  <Badge variant="outline">{semanticResults.agent.status ?? 'UNKNOWN'}</Badge>
+                  <h4>Genie Agent</h4>
+                  <strong>{semanticResults.agent.genie_agent?.name}</strong>
+                  <p>Space ID: <code>{semanticResults.agent.genie_agent?.space_id}</code></p>
+                </section>
+                <section className="workflow-job">
+                  <Badge variant="outline">{semanticResults.audit.status ?? 'UNKNOWN'}</Badge>
+                  <h4>Benchmark evaluation</h4>
+                  <strong>{semanticResults.agent.benchmark_summary?.num_correct ?? 0} / {semanticResults.agent.benchmark_summary?.num_questions ?? semanticResults.agent.benchmark_configuration?.length ?? 0} correct</strong>
+                  <p>{semanticResults.agent.benchmark_summary?.num_needs_review ?? 0} need review · {semanticResults.agent.benchmark_summary?.num_bad ?? 0} failed</p>
+                </section>
+              </div>
+              {(semanticResults.audit.warnings?.length || semanticResults.agent.exceptions?.length) ? (
+                <section className="workflow-job">
+                  <h4>Review findings</h4>
+                  <ul>
+                    {semanticResults.audit.warnings?.map((warning) => <li key={warning}>{warning}</li>)}
+                    {semanticResults.agent.exceptions?.map((exception) => <li key={exception.id ?? exception.detail}>{exception.id ? `${exception.id}: ` : ''}{exception.detail}</li>)}
+                  </ul>
+                </section>
+              ) : null}
+              <div className="workflow-job-actions">
+                <Button variant="outline" onClick={() => void loadSemanticResults()}>Refresh results</Button>
+                <Button onClick={() => setGroupStage('promote')}>Continue to promotion</Button>
+              </div>
+            </>
+          ) : null}
+        </section>
+        <section className="build-assets-stage" hidden={groupStage !== 'promote'}>
+          <div className="build-stage-intro">
+            <h3>Promotion decision</h3>
+            <p>Accept the generated assets as final, or request stable production names for a later rename workflow.</p>
+          </div>
+          <section className="workflow-job promotion-form">
+            <label>
+              <span>Final Metric View FQN</span>
+              <input value={finalMetricViewFqn} onChange={(event) => setFinalMetricViewFqn(event.target.value)} />
+            </label>
+            <label>
+              <span>Final Genie Agent name</span>
+              <input value={finalAgentName} onChange={(event) => setFinalAgentName(event.target.value)} />
+            </label>
+            <label>
+              <span>Review notes</span>
+              <textarea value={promotionNotes} onChange={(event) => setPromotionNotes(event.target.value)} rows={4} />
+            </label>
+            <Alert>
+              <CircleHelp className="size-4" />
+              <AlertTitle>Promotion behavior</AlertTitle>
+              <AlertDescription>
+                Keeping the current names accepts the created assets as final. Different names create an approved pending rename request; this step does not silently copy or rename governed assets.
+              </AlertDescription>
+            </Alert>
+            <div className="workflow-job-actions">
+              <Button onClick={() => void savePromotion()} disabled={promotionBusy || !finalMetricViewFqn || !finalAgentName}>
+                {promotionBusy ? 'Saving…' : 'Save promotion decision'}
+              </Button>
+            </div>
+            {semanticResults?.promotion ? (
+              <Alert>
+                <CheckCircle2 className="size-4" />
+                <AlertTitle>{semanticResults.promotion.status}</AlertTitle>
+                <AlertDescription>
+                  Saved by {semanticResults.promotion.approved_by} at {semanticResults.promotion.approved_at}.
+                </AlertDescription>
+              </Alert>
+            ) : null}
           </section>
         </section>
         <Dialog open={importPackageOpen} onOpenChange={setImportPackageOpen}>
