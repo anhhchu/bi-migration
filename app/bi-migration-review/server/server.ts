@@ -78,6 +78,19 @@ const promotionDecisionSchema = z.object({
   finalAgentName: z.string().trim().min(3).max(255),
   notes: z.string().trim().max(2000).optional().default(''),
 });
+const remediationPlanSchema = z.object({
+  decisions: z.array(z.object({
+    gapKey: z.string().min(1),
+    stage: z.enum(['Dashboard import', 'Metric View', 'Genie Agent']),
+    severity: z.enum(['high', 'medium', 'low', 'info']),
+    type: z.string().min(1),
+    detail: z.string().min(1),
+    resolution: z.string().optional(),
+    asset: z.string().optional(),
+    disposition: z.enum(['fix_now', 'accept', 'defer', 'not_applicable']),
+    notes: z.string().max(2000).optional().default(''),
+  })).min(1),
+});
 
 const SESSION_1_PROMPT_VERSION = '1.1.0';
 const METRIC_VIEW_PROMPT_VERSION = '1.1.0';
@@ -1369,6 +1382,105 @@ await createApp({
           response.status(400).json({
             error: 'Promotion decision was not saved.',
             detail: error instanceof Error ? error.message : 'Unknown promotion error',
+          });
+        }
+      });
+
+      app.post('/api/groups/:groupId/remediation', async (request, response) => {
+        const { groupId } = request.params;
+        const parsed = remediationPlanSchema.safeParse(request.body);
+        if (!/^group-\d{3}$/.test(groupId) || !activeVolumeRoot || !parsed.success) {
+          response.status(400).json({ error: parsed.error?.issues[0]?.message ?? 'Invalid remediation plan.' });
+          return;
+        }
+        try {
+          const volume = volumeHandle(request);
+          const groupRunPath = await groupWorkspacePath(request, activeVolumeRoot, groupId);
+          const semanticPath = `${groupRunPath}/semantic`;
+          const [manifestText, dashboardText, agentText] = await Promise.all([
+            volume.read(`${groupRunPath}/group-migration-manifest.json`),
+            volume.read(`${groupRunPath}/import/summary.json`),
+            volume.read(`${semanticPath}/genie-agent-result.json`),
+          ]);
+          const manifest = JSON.parse(manifestText) as {
+            approved_mapping_path: string;
+            candidate_metric_view_fqn: string;
+          };
+          const dashboardSummary = JSON.parse(dashboardText) as {
+            dashboards?: Array<{ workbook_name?: string; dashboard_id?: string; config_path?: string }>;
+          };
+          const agent = JSON.parse(agentText) as { genie_agent?: { space_id?: string; name?: string } };
+          const fixNow = parsed.data.decisions.filter((decision) => decision.disposition === 'fix_now');
+          const byStage = (stage: 'Dashboard import' | 'Metric View' | 'Genie Agent') =>
+            fixNow.filter((decision) => decision.stage === stage);
+          const formatGaps = (decisions: typeof fixNow) => decisions
+            .map((decision) => `- ${decision.gapKey} [${decision.severity}] ${decision.type}: ${decision.detail}${decision.notes ? ` Reviewer note: ${decision.notes}` : ''}`)
+            .join('\n');
+          const dashboardPrompt = [
+            '# Genie Code — Repair existing dashboards in place',
+            '',
+            `Approved mapping: ${manifest.approved_mapping_path}`,
+            `Dashboard reconciliation: ${groupRunPath}/import/summary.json`,
+            '',
+            'Do not run `/importBI`. Do not create a new dashboard. Update only the existing dashboard IDs listed below.',
+            ...((dashboardSummary.dashboards ?? []).map((dashboard) =>
+              `- ${dashboard.workbook_name}: dashboard ${dashboard.dashboard_id}; config ${dashboard.config_path}`
+            )),
+            '',
+            'Apply only these approved fixes:',
+            formatGaps(byStage('Dashboard import')) || '- No dashboard fixes selected.',
+            '',
+            'Record every changed dashboard ID and unresolved item in dashboard-remediation-result.json.',
+          ].join('\n');
+          const metricPrompt = [
+            '# Genie Code — Repair candidate Metric View in place',
+            '',
+            `Candidate Metric View: ${manifest.candidate_metric_view_fqn}`,
+            `Approved mapping: ${manifest.approved_mapping_path}`,
+            `Existing exceptions: ${semanticPath}/metric-view-exceptions.json`,
+            '',
+            'Update the existing candidate Metric View in place. Do not create a second Metric View and do not modify promoted assets.',
+            'Apply only these approved fixes:',
+            formatGaps(byStage('Metric View')) || '- No Metric View fixes selected.',
+            '',
+            'Rewrite metric-view-result.json and metric-view-exceptions.json, then leave deterministic validation to the validation task.',
+          ].join('\n');
+          const agentPrompt = [
+            '# Genie Code — Repair existing Genie Agent in place',
+            '',
+            `Existing Genie Agent: ${agent.genie_agent?.name ?? ''} (${agent.genie_agent?.space_id ?? ''})`,
+            `Governed Metric View: ${manifest.candidate_metric_view_fqn}`,
+            '',
+            'Update this existing Agent in place. Do not create another Agent or add unapproved data sources.',
+            'Apply only these approved fixes:',
+            formatGaps(byStage('Genie Agent')) || '- No Genie Agent fixes selected.',
+            '',
+            'Rewrite genie-agent-result.json with the existing Space ID, changes, remaining exceptions, and benchmark results.',
+          ].join('\n');
+          const user = await appkit.asUser(request).run(async () => getExecutionContext().client.currentUser.me());
+          const remediationPath = `${semanticPath}/remediation`;
+          const plan = {
+            version: new Date().toISOString(),
+            status: fixNow.length ? 'READY' : 'NO_FIXES_SELECTED',
+            created_by: user.userName || user.displayName || 'signed-in-user',
+            decisions: parsed.data.decisions,
+            prompts: {
+              dashboard: `${remediationPath}/dashboard-repair-prompt.md`,
+              metric_view: `${remediationPath}/metric-view-repair-prompt.md`,
+              genie_agent: `${remediationPath}/genie-agent-repair-prompt.md`,
+            },
+          };
+          await Promise.all([
+            volume.upload(`${remediationPath}/plan.json`, JSON.stringify(plan, null, 2), { overwrite: true }),
+            volume.upload(plan.prompts.dashboard, dashboardPrompt, { overwrite: true }),
+            volume.upload(plan.prompts.metric_view, metricPrompt, { overwrite: true }),
+            volume.upload(plan.prompts.genie_agent, agentPrompt, { overwrite: true }),
+          ]);
+          response.json({ plan, dashboardPrompt, metricPrompt, agentPrompt });
+        } catch (error) {
+          response.status(400).json({
+            error: 'Remediation package was not created.',
+            detail: error instanceof Error ? error.message : 'Unknown remediation error',
           });
         }
       });
