@@ -73,6 +73,11 @@ const relationshipUpdateSchema = z.object({
   temporalPredicates: z.array(z.string()),
   recordFilters: z.array(z.string()),
 });
+const promotionDecisionSchema = z.object({
+  finalMetricViewFqn: z.string().regex(/^[A-Za-z_][\w-]*\.[A-Za-z_][\w-]*\.[A-Za-z_][\w-]*$/),
+  finalAgentName: z.string().trim().min(3).max(255),
+  notes: z.string().trim().max(2000).optional().default(''),
+});
 
 const SESSION_1_PROMPT_VERSION = '1.1.0';
 const METRIC_VIEW_PROMPT_VERSION = '1.1.0';
@@ -1265,6 +1270,74 @@ await createApp({
           response.status(404).json({
             error: 'No semantic workflow run is available for this group.',
             detail: error instanceof Error ? error.message : 'Unknown workflow error',
+          });
+        }
+      });
+
+      app.get('/api/groups/:groupId/semantic-results', async (request, response) => {
+        const { groupId } = request.params;
+        if (!/^group-\d{3}$/.test(groupId) || !activeVolumeRoot) {
+          response.status(400).json({ error: 'A valid Volume-backed semantic group is required.' });
+          return;
+        }
+        try {
+          const volume = volumeHandle(request);
+          const groupRunPath = await groupWorkspacePath(request, activeVolumeRoot, groupId);
+          const semanticPath = `${groupRunPath}/semantic`;
+          const readJson = async (path: string) => JSON.parse(await volume.read(path)) as Record<string, unknown>;
+          const [manifest, metricView, agent, audit, promotion] = await Promise.all([
+            readJson(`${groupRunPath}/group-migration-manifest.json`),
+            readJson(`${semanticPath}/metric-view-result.json`),
+            readJson(`${semanticPath}/genie-agent-result.json`),
+            readJson(`${semanticPath}/semantic-audit.json`),
+            readJson(`${semanticPath}/promotion.json`).catch(() => null),
+          ]);
+          response.json({ manifest, metricView, agent, audit, promotion });
+        } catch (error) {
+          response.status(404).json({
+            error: 'Semantic results are unavailable.',
+            detail: error instanceof Error ? error.message : 'Unknown semantic result error',
+          });
+        }
+      });
+
+      app.post('/api/groups/:groupId/promotion', async (request, response) => {
+        const { groupId } = request.params;
+        const parsed = promotionDecisionSchema.safeParse(request.body);
+        if (!/^group-\d{3}$/.test(groupId) || !activeVolumeRoot || !parsed.success) {
+          response.status(400).json({ error: parsed.error?.issues[0]?.message ?? 'Invalid promotion decision.' });
+          return;
+        }
+        try {
+          const volume = volumeHandle(request);
+          const groupRunPath = await groupWorkspacePath(request, activeVolumeRoot, groupId);
+          const semanticPath = `${groupRunPath}/semantic`;
+          const manifest = JSON.parse(await volume.read(`${groupRunPath}/group-migration-manifest.json`)) as {
+            candidate_metric_view_fqn: string;
+            genie_agent_name: string;
+          };
+          const audit = JSON.parse(await volume.read(`${semanticPath}/semantic-audit.json`)) as { status?: string };
+          if (!audit.status?.startsWith('COMPLETE')) throw new Error('Complete semantic review before promotion.');
+          const user = await appkit.asUser(request).run(async () => getExecutionContext().client.currentUser.me());
+          const renamesRequired =
+            parsed.data.finalMetricViewFqn !== manifest.candidate_metric_view_fqn ||
+            parsed.data.finalAgentName !== manifest.genie_agent_name;
+          const decision = {
+            status: renamesRequired ? 'APPROVED_PENDING_RENAME' : 'ACCEPTED_AS_FINAL',
+            candidate_metric_view_fqn: manifest.candidate_metric_view_fqn,
+            candidate_agent_name: manifest.genie_agent_name,
+            final_metric_view_fqn: parsed.data.finalMetricViewFqn,
+            final_agent_name: parsed.data.finalAgentName,
+            notes: parsed.data.notes,
+            approved_by: user.userName || user.displayName || 'signed-in-user',
+            approved_at: new Date().toISOString(),
+          };
+          await volume.upload(`${semanticPath}/promotion.json`, JSON.stringify(decision, null, 2), { overwrite: true });
+          response.json(decision);
+        } catch (error) {
+          response.status(400).json({
+            error: 'Promotion decision was not saved.',
+            detail: error instanceof Error ? error.message : 'Unknown promotion error',
           });
         }
       });
