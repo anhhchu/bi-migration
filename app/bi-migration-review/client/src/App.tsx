@@ -187,8 +187,12 @@ type SemanticResults = {
   dashboardSummary: {
     status?: string;
     dashboards?: Array<{ dashboard_id?: string; display_name?: string; workbook_name?: string; url?: string | null }>;
+    findings?: Array<{ severity?: string; type?: string; detail?: string; resolution?: string; workbook_name?: string }>;
   };
   metricView: { status?: string; metric_view_fqn?: string; dimension_count?: number; measure_count?: number };
+  metricExceptions?: {
+    exceptions?: Array<{ id?: string; severity?: string; type?: string; detail?: string; resolution?: string }>;
+  };
   agent: {
     status?: string;
     genie_agent?: { name?: string; space_id?: string; url_path?: string };
@@ -308,26 +312,6 @@ const issueLabels: Record<string, string> = {
   inventory_errors: 'Inventory errors detected',
   mapping_document_errors: 'Mapping documents quarantined',
 };
-
-function benchmarkFinding(
-  exception: { id?: string; detail?: string },
-  benchmarks: Array<{ benchmark_key?: string; question?: string }>
-) {
-  const key = exception.id?.replace(/^BF-/, '') ?? 'Benchmark';
-  const source = exception.detail ?? '';
-  const benchmark = benchmarks.find((candidate) => candidate.benchmark_key === key);
-  const explanations = [
-    source.includes('MISSING_OR_INCORRECT_FILTER') ? 'The answer may not have applied every requested filter.' : '',
-    source.includes('RESULT_MISSING_COLUMNS') ? 'The result omitted one or more expected columns.' : '',
-    source.includes('INCOMPLETE_OR_PARTIAL_OUTPUT') ? 'The answer was incomplete or only partially addressed the question.' : '',
-  ].filter(Boolean);
-  return {
-    key,
-    question: benchmark?.question ?? key,
-    status: source.includes('NEEDS_REVIEW') ? 'Needs review' : 'Failed',
-    explanation: explanations.join(' ') || 'The benchmark result did not meet its expected answer criteria.',
-  };
-}
 
 export default function App() {
   const [view, setView] = useState<'upload' | 'review'>(() =>
@@ -1206,6 +1190,39 @@ function MappingWorkspace({ group, detail, onBack }: { group: GroupSummary; deta
     (relationship, index) => relationship.status === 'unresolved' && !savedRelationships.has(index)
   ).length;
   const totalBlockingCount = blockingMappingCount + blockingRelationshipCount;
+  const migrationGaps = useMemo(() => {
+    if (!semanticResults) return [];
+    const dashboardGaps = (semanticResults.dashboardSummary.findings ?? []).map((finding, index) => ({
+      key: `dashboard-${index}`,
+      stage: 'Dashboard import',
+      severity: finding.severity ?? 'info',
+      type: finding.type ?? 'migration_gap',
+      detail: finding.detail ?? 'Dashboard migration gap recorded.',
+      resolution: finding.resolution,
+      asset: finding.workbook_name,
+    }));
+    const metricGaps = (semanticResults.metricExceptions?.exceptions ?? []).map((finding, index) => ({
+      key: finding.id ?? `metric-${index}`,
+      stage: 'Metric View',
+      severity: finding.severity ?? 'info',
+      type: finding.type ?? 'semantic_gap',
+      detail: finding.detail ?? 'Metric View gap recorded.',
+      resolution: finding.resolution,
+      asset: undefined,
+    }));
+    const agentGaps = (semanticResults.agent.exceptions ?? [])
+      .filter((finding) => !finding.id?.startsWith('BF-') && !finding.id?.startsWith('PLATFORM-'))
+      .map((finding, index) => ({
+        key: finding.id ?? `agent-${index}`,
+        stage: 'Genie Agent',
+        severity: 'medium',
+        type: 'agent_gap',
+        detail: finding.detail ?? 'Genie Agent gap recorded.',
+        resolution: undefined,
+        asset: undefined,
+      }));
+    return [...dashboardGaps, ...metricGaps, ...agentGaps];
+  }, [semanticResults]);
 
   const loadSemanticRun = async () => {
     const response = await fetch(`/api/groups/${group.group_id}/semantic-run`);
@@ -1786,9 +1803,9 @@ function MappingWorkspace({ group, detail, onBack }: { group: GroupSummary; deta
                 </section>
                 <section className="workflow-job">
                   <Badge variant="outline">{semanticResults.audit.status ?? 'UNKNOWN'}</Badge>
-                  <h4>Benchmark evaluation</h4>
-                  <strong>{semanticResults.agent.benchmark_summary?.num_correct ?? 0} / {semanticResults.agent.benchmark_summary?.num_questions ?? semanticResults.agent.benchmark_configuration?.length ?? 0} correct</strong>
-                  <p>{semanticResults.agent.benchmark_summary?.num_needs_review ?? 0} need review · {semanticResults.agent.benchmark_summary?.num_bad ?? 0} failed</p>
+                  <h4>Migration gaps</h4>
+                  <strong>{migrationGaps.filter((gap) => gap.severity !== 'info').length} require review</strong>
+                  <p>{migrationGaps.filter((gap) => gap.severity === 'high').length} high · {migrationGaps.filter((gap) => gap.severity === 'medium').length} medium · {migrationGaps.filter((gap) => gap.severity === 'low').length} low</p>
                 </section>
               </div>
               <section className="workflow-job">
@@ -1805,19 +1822,17 @@ function MappingWorkspace({ group, detail, onBack }: { group: GroupSummary; deta
                   ))}
                 </div>
               </section>
-              {semanticResults.agent.exceptions?.some((exception) => exception.id?.startsWith('BF-')) ? (
+              {migrationGaps.length ? (
                 <section className="workflow-job">
-                  <h4>Questions to review</h4>
-                  <p>These benchmark answers need attention before production promotion.</p>
+                  <h4>Migration gaps to review</h4>
+                  <p>Gaps identified while creating dashboards, consolidating the Metric View, and configuring the Genie Agent.</p>
                   <div className="benchmark-findings">
-                    {semanticResults.agent.exceptions
-                      .filter((exception) => exception.id?.startsWith('BF-'))
-                      .map((exception) => benchmarkFinding(exception, semanticResults.agent.benchmark_configuration ?? []))
-                      .map((finding) => (
-                        <article key={finding.key}>
-                          <Badge variant="outline">{finding.status}</Badge>
-                          <strong>{finding.question}</strong>
-                          <p>{finding.explanation}</p>
+                    {migrationGaps.map((gap) => (
+                        <article key={gap.key}>
+                          <Badge variant="outline">{gap.severity}</Badge>
+                          <strong>{gap.stage}: {gap.type.replaceAll('_', ' ')}</strong>
+                          <p>{gap.asset ? `${gap.asset}: ` : ''}{gap.detail}</p>
+                          {gap.resolution ? <small>Resolution: {gap.resolution}</small> : null}
                         </article>
                       ))}
                   </div>
