@@ -1,0 +1,297 @@
+resources:
+  jobs:
+    datasource_semantic_orchestrator:
+      name: '[${bundle.target}] Propose semantic groups'
+      performance_target: PERFORMANCE_OPTIMIZED
+      tags:
+        aidevkit_project: bi-migration-blueprint
+      max_concurrent_runs: 10
+      parameters:
+        - name: input_volume_path
+          default: ''
+      tasks:
+        - task_key: inventory_inputs
+          notebook_task:
+            notebook_path: ../notebooks/inventory_inputs.py
+            base_parameters:
+              input_volume_path: '{{job.parameters.input_volume_path}}'
+              workflow_run_id: '{{job.run_id}}'
+              job_run_id: '{{job.run_id}}'
+              output_volume_path: ${var.output_volume_path}
+              candidate_catalog: ${var.candidate_catalog}
+              candidate_schema: ${var.candidate_schema}
+              staging_schema: ${var.staging_schema}
+              warehouse_id: ${var.warehouse_id}
+              analysis_batch_size: ${var.analysis_batch_size}
+              analysis_batch_workers: ${var.analysis_batch_workers}
+          environment_key: workflow
+        - task_key: analyze_datasources
+          depends_on:
+            - task_key: inventory_inputs
+          for_each_task:
+            inputs: '{{tasks.inventory_inputs.values.analysis_batches}}'
+            concurrency: 10
+            task:
+              task_key: analyze_datasource_batch
+              notebook_task:
+                notebook_path: ../notebooks/analyze_datasource_batch.py
+                base_parameters:
+                  inventory_path: '{{tasks.inventory_inputs.values.inventory_path}}'
+                  asset_indexes: '{{input}}'
+                  analysis_batch_workers: ${var.analysis_batch_workers}
+              environment_key: workflow
+        - task_key: prepare_semantic_grouping
+          depends_on:
+            - task_key: analyze_datasources
+          notebook_task:
+            notebook_path: ../notebooks/prepare_semantic_grouping.py
+            base_parameters:
+              manifest_path: '{{tasks.inventory_inputs.values.manifest_path}}'
+              inventory_path: '{{tasks.inventory_inputs.values.inventory_path}}'
+          environment_key: workflow
+        - task_key: propose_semantic_groups
+          depends_on:
+            - task_key: prepare_semantic_grouping
+          timeout_seconds: 3600
+          notebook_task:
+            notebook_path: ../notebooks/genie_task_not_configured.py
+            base_parameters:
+              prompt_path: '{{tasks.prepare_semantic_grouping.values.grouping_request_path}}'
+          environment_key: workflow
+        - task_key: build_semantic_groups
+          depends_on:
+            - task_key: prepare_semantic_grouping
+            - task_key: propose_semantic_groups
+          run_if: ALL_DONE
+          notebook_task:
+            notebook_path: ../notebooks/build_semantic_groups.py
+            base_parameters:
+              manifest_path: '{{tasks.inventory_inputs.values.manifest_path}}'
+              inventory_path: '{{tasks.inventory_inputs.values.inventory_path}}'
+              datasource_ir_index_path: '{{tasks.prepare_semantic_grouping.values.datasource_ir_index_path}}'
+              metric_ir_index_path: '{{tasks.prepare_semantic_grouping.values.metric_ir_index_path}}'
+              grouping_proposal_path: '{{tasks.prepare_semantic_grouping.values.grouping_result_path}}'
+              candidate_catalog: ${var.candidate_catalog}
+              candidate_schema: ${var.candidate_schema}
+          environment_key: workflow
+        - task_key: finalize_semantic_grouping
+          depends_on:
+            - task_key: build_semantic_groups
+          notebook_task:
+            notebook_path: ../notebooks/finalize_semantic_grouping.py
+            base_parameters:
+              manifest_path: '{{tasks.inventory_inputs.values.manifest_path}}'
+              groups_index_path: '{{tasks.build_semantic_groups.values.groups_index_path}}'
+              migration_job_id: ${resources.jobs.datasource_semantic_migration.id}
+          environment_key: workflow
+      environments:
+        - environment_key: workflow
+          spec:
+            environment_version: '4'
+            dependencies:
+              - ../dist/*.whl
+              - lark==1.3.1
+              - PyYAML==6.0.3
+
+    datasource_semantic_migration:
+      name: '[${bundle.target}] Migrate approved semantic groups'
+      performance_target: PERFORMANCE_OPTIMIZED
+      tags:
+        aidevkit_project: bi-migration-blueprint
+      max_concurrent_runs: 10
+      parameters:
+        - name: proposal_run_id
+          default: ''
+        - name: approved_by
+          default: ''
+        - name: warehouse_id
+          default: ${var.warehouse_id}
+      tasks:
+        - task_key: approve_semantic_groups
+          notebook_task:
+            notebook_path: ../notebooks/approve_semantic_groups.py
+            base_parameters:
+              proposal_run_id: '{{job.parameters.proposal_run_id}}'
+              output_volume_path: ${var.output_volume_path}
+              migration_run_id: '{{job.run_id}}'
+              approved_by: '{{job.parameters.approved_by}}'
+          environment_key: workflow
+        - task_key: migrate_semantic_groups
+          depends_on:
+            - task_key: approve_semantic_groups
+          for_each_task:
+            inputs: '{{tasks.approve_semantic_groups.values.group_selectors}}'
+            concurrency: 10
+            task:
+              task_key: migrate_semantic_group
+              run_job_task:
+                job_id: ${resources.jobs.datasource_semantic_group.id}
+                job_parameters:
+                  workflow_run_id: '{{job.run_id}}'
+                  semantic_groups_index_path: '{{tasks.approve_semantic_groups.values.groups_index_path}}'
+                  group_selector: '{{input}}'
+                  warehouse_id: '{{job.parameters.warehouse_id}}'
+        - task_key: finalize_workflow
+          depends_on:
+            - task_key: migrate_semantic_groups
+          run_if: ALL_DONE
+          notebook_task:
+            notebook_path: ../notebooks/finalize_workflow.py
+            base_parameters:
+              manifest_path: '{{tasks.approve_semantic_groups.values.manifest_path}}'
+              groups_index_path: '{{tasks.approve_semantic_groups.values.groups_index_path}}'
+          environment_key: workflow
+      environments:
+        - environment_key: workflow
+          spec:
+            environment_version: '4'
+            dependencies:
+              - ../dist/*.whl
+              - lark==1.3.1
+              - PyYAML==6.0.3
+
+    datasource_semantic_group:
+      name: '[${bundle.target}] Datasource semantic group'
+      performance_target: PERFORMANCE_OPTIMIZED
+      tags:
+        aidevkit_project: bi-migration-blueprint
+      max_concurrent_runs: 10
+      parameters:
+        - name: workflow_run_id
+          default: ''
+        - name: semantic_groups_index_path
+          default: ''
+        - name: group_selector
+          default: ''
+        - name: warehouse_id
+          default: ${var.warehouse_id}
+      tasks:
+        - task_key: prepare_candidate_context
+          notebook_task:
+            notebook_path: ../notebooks/prepare_candidate_context.py
+            base_parameters:
+              semantic_groups_index_path: '{{job.parameters.semantic_groups_index_path}}'
+              group_selector: '{{job.parameters.group_selector}}'
+              warehouse_id: '{{job.parameters.warehouse_id}}'
+          environment_key: workflow
+        - task_key: create_candidate_metric_view
+          depends_on:
+            - task_key: prepare_candidate_context
+          timeout_seconds: 7200
+          notebook_task:
+            notebook_path: ../notebooks/genie_task_not_configured.py
+            base_parameters:
+              prompt_path: '{{tasks.prepare_candidate_context.values.prompt_path}}'
+          environment_key: workflow
+        - task_key: reconcile_evaluate_repair
+          depends_on:
+            - task_key: prepare_candidate_context
+            - task_key: create_candidate_metric_view
+          run_if: ALL_DONE
+          notebook_task:
+            notebook_path: ../notebooks/reconcile_evaluate_repair.py
+            base_parameters:
+              group_manifest_path: '{{tasks.prepare_candidate_context.values.group_manifest_path}}'
+              target_profile_path: '{{tasks.prepare_candidate_context.values.target_profile_path}}'
+              importbi_result_path: '{{tasks.prepare_candidate_context.values.importbi_result_path}}'
+              warehouse_id: '{{job.parameters.warehouse_id}}'
+          environment_key: workflow
+        - task_key: run_metric_view_repair
+          depends_on:
+            - task_key: prepare_candidate_context
+            - task_key: reconcile_evaluate_repair
+          run_if: ALL_DONE
+          run_job_task:
+            job_id: ${resources.jobs.datasource_semantic_repair.id}
+            job_parameters:
+              group_path: '{{tasks.prepare_candidate_context.values.group_path}}'
+              repair_series_id: ''
+              attempt: '1'
+              max_attempts: '3'
+              requested_by: ''
+      environments:
+        - environment_key: workflow
+          spec:
+            environment_version: '4'
+            dependencies:
+              - ../dist/*.whl
+              - lark==1.3.1
+              - PyYAML==6.0.3
+
+    datasource_semantic_repair:
+      name: '[${bundle.target}] Datasource semantic repair'
+      performance_target: PERFORMANCE_OPTIMIZED
+      tags:
+        aidevkit_project: bi-migration-blueprint
+      max_concurrent_runs: 10
+      parameters:
+        - name: group_path
+          default: ''
+        - name: repair_series_id
+          default: ''
+        - name: attempt
+          default: '1'
+        - name: max_attempts
+          default: '3'
+        - name: requested_by
+          default: ''
+      tasks:
+        - task_key: snapshot_evaluate_classify
+          notebook_task:
+            notebook_path: ../notebooks/snapshot_evaluate_classify.py
+            base_parameters:
+              group_path: '{{job.parameters.group_path}}'
+              repair_series_id: '{{job.parameters.repair_series_id}}'
+              attempt: '{{job.parameters.attempt}}'
+              max_attempts: '{{job.parameters.max_attempts}}'
+              job_run_id: '{{job.run_id}}'
+          environment_key: workflow
+        - task_key: build_deterministic_patches
+          depends_on:
+            - task_key: snapshot_evaluate_classify
+          notebook_task:
+            notebook_path: ../notebooks/build_deterministic_patches.py
+            base_parameters:
+              attempt_dir: '{{tasks.snapshot_evaluate_classify.values.attempt_dir}}'
+          environment_key: workflow
+        - task_key: should_use_genie
+          depends_on:
+            - task_key: build_deterministic_patches
+          condition_task:
+            op: EQUAL_TO
+            left: '{{tasks.build_deterministic_patches.values.needs_genie}}'
+            right: 'true'
+        - task_key: genie_semantic_patch
+          depends_on:
+            - task_key: should_use_genie
+              outcome: 'true'
+          timeout_seconds: 3600
+          notebook_task:
+            notebook_path: ../notebooks/genie_task_not_configured.py
+            base_parameters:
+              prompt_path: '{{tasks.build_deterministic_patches.values.genie_request_path}}'
+          environment_key: workflow
+        - task_key: deploy_retest_finalize
+          depends_on:
+            - task_key: build_deterministic_patches
+            - task_key: genie_semantic_patch
+          run_if: ALL_DONE
+          notebook_task:
+            notebook_path: ../notebooks/deploy_retest_finalize.py
+            base_parameters:
+              group_path: '{{job.parameters.group_path}}'
+              attempt_dir: '{{tasks.snapshot_evaluate_classify.values.attempt_dir}}'
+              repair_series_id: '{{tasks.build_deterministic_patches.values.repair_series_id}}'
+              attempt: '{{job.parameters.attempt}}'
+              max_attempts: '{{job.parameters.max_attempts}}'
+              repair_job_id: '{{job.id}}'
+              requested_by: '{{job.parameters.requested_by}}'
+          environment_key: workflow
+      environments:
+        - environment_key: workflow
+          spec:
+            environment_version: '4'
+            dependencies:
+              - ../dist/*.whl
+              - lark==1.3.1
+              - PyYAML==6.0.3

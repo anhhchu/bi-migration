@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://databricks.example/bi-migration/metric-scorecard/1.0",
+  "title": "Metric Evaluation Scorecard",
+  "type": "object",
+  "required": ["metric_id", "source_name", "status", "evidence_level", "translation", "relationship_safety", "failure_codes", "repair_route"],
+  "properties": {
+    "metric_id": {"type": ["string", "null"]},
+    "source_name": {"type": "string"},
+    "target_name": {"type": ["string", "null"]},
+    "criticality": {"enum": ["standard", "critical"]},
+    "status": {"enum": ["PASS_EXACT", "PASS_WITH_TOLERANCE", "PASS_SOURCE_FIXTURE", "PASS_SEMANTIC_ONLY", "PASS_INVARIANTS_ONLY", "NOT_COMPARABLE", "BLOCKED_UNRESOLVED_MAPPING", "BLOCKED_UNSAFE_GRAIN", "FAILED_SEMANTICS", "FAILED_VALUE", "EXCLUDED_UNSUPPORTED"]},
+    "evidence_level": {"enum": ["EXACT", "SOURCE_FIXTURE", "SEMANTIC_ONLY", "INVARIANTS_ONLY", "NONE"]},
+    "translation": {"type": "object"},
+    "relationship_safety": {"type": "object"},
+    "queryability": {"enum": ["PASS", "FAIL", "NOT_RUN", "NOT_APPLICABLE"]},
+    "query": {
+      "type": "object",
+      "required": ["status"],
+      "properties": {
+        "status": {"enum": ["PASS", "FAIL", "NOT_RUN", "NOT_APPLICABLE"]},
+        "reason": {"type": "string"},
+        "sql": {"type": "string"},
+        "error": {"type": "string"}
+      },
+      "additionalProperties": false
+    },
+    "failure_codes": {"type": "array", "items": {"type": "string"}},
+    "repair_route": {"type": "string"},
+    "dependencies": {"type": "array"},
+    "source": {"type": ["object", "null"]},
+    "target": {"type": ["object", "null"]}
+  },
+  "additionalProperties": false
+}

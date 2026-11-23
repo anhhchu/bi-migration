@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://databricks.example/bi-migration/mapping-revision/1.0",
+  "title": "Mapping Revision Manifest",
+  "type": "object",
+  "required": ["schema_version", "workflow_run_id", "revision_id", "parent_hash", "revision_hash", "triggering_findings", "evidence_hashes", "generator", "created_at", "status"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "workflow_run_id": {"type": "string", "minLength": 1},
+    "revision_id": {"type": "string", "minLength": 1},
+    "parent_hash": {"type": "string"},
+    "revision_hash": {"type": "string"},
+    "triggering_findings": {"type": "array", "items": {"type": "string"}},
+    "evidence_hashes": {"type": "array", "items": {"type": "string"}},
+    "generator": {"type": "object"},
+    "created_at": {"type": "string", "format": "date-time"},
+    "status": {"enum": ["PROPOSED", "APPROVED_AUTOMATICALLY", "REJECTED", "ROLLED_BACK"]}
+  },
+  "additionalProperties": false
+}

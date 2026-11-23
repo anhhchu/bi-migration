@@ -1,0 +1,40 @@
+bundle:
+  name: datasource-semantic-migration
+
+include:
+  - resources/*.yml
+
+variables:
+  output_volume_path:
+    description: Volume directory for workflow artifacts
+  candidate_catalog:
+    description: Catalog containing the isolated candidate schema
+  candidate_schema:
+    description: Isolated schema for candidate Metric Views
+  staging_schema:
+    description: Isolated schema for temporary Hyper fixtures
+  analysis_batch_size:
+    description: Maximum unique datasource files analyzed by one task iteration
+  analysis_batch_workers:
+    description: Concurrent datasource parsers within one analysis batch
+  warehouse_id:
+    description: SQL warehouse used for Metric View DDL and queries
+
+artifacts:
+  default:
+    type: whl
+    path: .
+    build: uv build
+
+targets:
+  dev:
+    default: true
+    mode: development
+    variables:
+      output_volume_path: /Volumes/main/bi_migration/semantic_workflows
+      candidate_catalog: main
+      candidate_schema: bi_migration
+      staging_schema: bi_migration_staging
+      analysis_batch_size: 25
+      analysis_batch_workers: 8
+      warehouse_id: <warehouse-id>

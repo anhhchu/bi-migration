@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://databricks.example/bi-migration/importbi-result/1.0",
+  "title": "Semantic-only ImportBI Construction Result",
+  "type": "object",
+  "required": ["schema_version", "workflow_run_id", "group_id", "status", "requested_metric_view_fqn", "created_metric_view_fqn", "construction_method", "source_tables", "dimensions_created", "measures_created", "unsupported_items", "metric_view_yaml_path"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "workflow_run_id": {"type": "string", "minLength": 1},
+    "group_id": {"type": "string", "minLength": 1},
+    "status": {"enum": ["SUCCESS", "PARTIAL", "FAILED"]},
+    "requested_metric_view_fqn": {"type": "string", "minLength": 1},
+    "created_metric_view_fqn": {"type": ["string", "null"]},
+    "construction_method": {"enum": ["IMPORTBI", "DETERMINISTIC_FALLBACK"]},
+    "source_tables": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+    "dimensions_created": {"type": "array", "items": {"type": "string"}},
+    "measures_created": {"type": "array", "items": {"type": "string"}},
+    "unsupported_items": {"type": "array", "items": {"type": "object"}},
+    "metric_view_yaml_path": {"type": ["string", "null"]},
+    "created_asset_ids": {"type": "array", "items": {"type": "string"}}
+  },
+  "additionalProperties": false
+}

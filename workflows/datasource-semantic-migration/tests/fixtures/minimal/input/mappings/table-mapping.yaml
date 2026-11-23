@@ -1,0 +1,9 @@
+version: "1.0"
+table_mappings:
+  - source:
+      system: snowflake
+      database: LEGACY_DW
+      schema: SALES
+      table: ORDERS
+    target:
+      table: main.sales.order_lines

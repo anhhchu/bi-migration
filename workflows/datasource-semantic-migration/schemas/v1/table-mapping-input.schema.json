@@ -1,0 +1,101 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://databricks.example/bi-migration/table-mapping-input/1.0",
+  "title": "Datasource Table Equivalence Mapping Input",
+  "type": "object",
+  "required": ["version", "table_mappings"],
+  "properties": {
+    "version": {"const": "1.0"},
+    "table_mappings": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["source", "target"],
+        "properties": {
+          "source": {
+            "type": "object",
+            "required": ["system", "database", "schema", "table"],
+            "properties": {
+              "system": {"type": "string", "minLength": 1},
+              "database": {"type": "string", "minLength": 1},
+              "schema": {"type": "string", "minLength": 1},
+              "datasource": {"type": "string", "minLength": 1},
+              "business_domain": {"type": "string", "minLength": 1},
+              "display_name": {"type": "string", "minLength": 1},
+              "table": {"type": "string", "minLength": 1},
+              "grain": {"type": "string"},
+              "business_keys": {"type": "array", "items": {"type": "string"}},
+              "event_date": {"type": "string"}
+            },
+            "additionalProperties": false
+          },
+          "target": {
+            "type": "object",
+            "required": ["table"],
+            "properties": {
+              "table": {"type": "string", "pattern": "^[^.]+\\.[^.]+\\.[^.]+$"},
+              "grain": {"type": "string"},
+              "business_keys": {"type": "array", "items": {"type": "string"}},
+              "temporal_model": {"enum": ["none", "scd2", "valid_time", "bitemporal"]},
+              "event_date": {"type": "string"}
+            },
+            "additionalProperties": false
+          },
+          "unit_conversions": {"type": "array", "items": {"type": "object"}}
+        },
+        "additionalProperties": false
+      }
+    },
+    "relationships": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "left", "right", "cardinality"],
+        "properties": {
+          "name": {"type": "string", "minLength": 1},
+          "left": {"$ref": "#/$defs/relationshipEnd"},
+          "right": {"$ref": "#/$defs/relationshipEnd"},
+          "cardinality": {"enum": ["many_to_one", "one_to_one", "one_to_many"]},
+          "temporal": {
+            "type": "object",
+            "required": ["event_column", "valid_from_column", "valid_to_column"],
+            "properties": {
+              "event_column": {"type": "string", "minLength": 1},
+              "valid_from_column": {"type": "string", "minLength": 1},
+              "valid_to_column": {"type": "string", "minLength": 1},
+              "valid_to_inclusive": {"type": "boolean", "default": false},
+              "recorded_to_column": {"type": "string", "minLength": 1},
+              "current_record_value": {"type": ["string", "null"]}
+            },
+            "additionalProperties": false
+          },
+          "current_record": {
+            "type": "object",
+            "required": ["side", "recorded_to_column", "current_value"],
+            "properties": {
+              "side": {"enum": ["left", "right", "both"]},
+              "recorded_to_column": {"type": "string", "minLength": 1},
+              "current_value": {"type": ["string", "null"]}
+            },
+            "additionalProperties": false
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "$defs": {
+    "relationshipEnd": {
+      "type": "object",
+      "required": ["table", "columns"],
+      "properties": {
+        "table": {"type": "string", "pattern": "^[^.]+\\.[^.]+\\.[^.]+$"},
+        "columns": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+        "unique_key": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}}
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

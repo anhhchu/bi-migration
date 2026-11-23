@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://databricks.example/bi-migration/metric-ir/1.0",
+  "title": "Metric Intermediate Representation",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "workflow_run_id",
+    "datasource_id",
+    "datasource_name",
+    "source_path",
+    "document_path",
+    "dimensions",
+    "measures",
+    "parameters",
+    "calculation_graph",
+    "findings",
+    "provenance"
+  ],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "workflow_run_id": {"type": "string", "minLength": 1},
+    "datasource_id": {"type": "string", "minLength": 1},
+    "datasource_name": {"type": ["string", "null"]},
+    "source_path": {"type": "string", "pattern": "^/Volumes/"},
+    "document_path": {"type": "string", "minLength": 1},
+    "dimensions": {"type": "array", "items": {"type": "object"}},
+    "measures": {"type": "array", "items": {"type": "object"}},
+    "parameters": {"type": "array", "items": {"type": "object"}},
+    "calculation_graph": {
+      "type": "object",
+      "required": ["nodes", "edges", "topological_order", "cyclic_nodes"]
+    },
+    "findings": {"type": "array", "items": {"type": "object"}},
+    "provenance": {"type": "object"}
+  },
+  "additionalProperties": false
+}

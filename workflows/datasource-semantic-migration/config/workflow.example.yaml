@@ -1,0 +1,11 @@
+output_volume_path: /Volumes/main/bi_migration/semantic_workflows
+candidate_catalog: main
+candidate_schema: bi_migration
+staging_schema: bi_migration_staging
+warehouse_id: replace-with-warehouse-id
+max_concurrency: 10
+analysis_batch_size: 25
+analysis_batch_workers: 8
+max_repair_attempts: 3
+retention_days: 7
+policy_path: config/default-policy.yaml

@@ -1,0 +1,21 @@
+version: "1.0"
+grouping:
+  source_similarity_threshold: 0.65
+  weights:
+    relation_graph: 0.35
+    calculations: 0.30
+    fields: 0.20
+    connection_lineage: 0.10
+    metadata: 0.05
+relationships:
+  required_fanout: 1.0
+  maximum_orphan_rate: 0.0
+  allow_many_to_many: false
+  allow_overlapping_temporal_intervals: false
+repair:
+  maximum_attempts: 3
+  stop_on_repeated_signature: true
+  rollback_on_regression: true
+retention:
+  candidate_days: 7
+  staging_days: 7

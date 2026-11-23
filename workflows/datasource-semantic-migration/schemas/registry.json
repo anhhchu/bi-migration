@@ -1,0 +1,20 @@
+{
+  "schema_version": "1.0",
+  "schemas": {
+    "datasource_ir": {"version": "1.0", "path": "v1/datasource-ir.schema.json", "id": "https://databricks.example/bi-migration/datasource-ir/1.0"},
+    "datasource_ir_index": {"version": "1.0", "path": "v1/datasource-ir-index.schema.json", "id": "https://databricks.example/bi-migration/datasource-ir-index/1.0"},
+    "deterministic_patch": {"version": "1.0", "path": "v1/deterministic-patch.schema.json", "id": "https://databricks.example/bi-migration/deterministic-patch/1.0"},
+    "evaluation_summary": {"version": "1.0", "path": "v1/evaluation-summary.schema.json", "id": "https://databricks.example/bi-migration/evaluation-summary/1.0"},
+    "genie_patch": {"version": "1.0", "path": "v1/genie-patch.schema.json", "id": "https://databricks.example/bi-migration/genie-patch/1.0"},
+    "importbi_result": {"version": "1.0", "path": "v1/importbi-result.schema.json", "id": "https://databricks.example/bi-migration/importbi-result/1.0"},
+    "input_inventory": {"version": "1.0", "path": "v1/input-inventory.schema.json", "id": "https://databricks.example/bi-migration/input-inventory/1.0"},
+    "mapping_revision": {"version": "1.0", "path": "v1/mapping-revision.schema.json", "id": "https://databricks.example/bi-migration/mapping-revision/1.0"},
+    "metric_ir": {"version": "1.0", "path": "v1/metric-ir.schema.json", "id": "https://databricks.example/bi-migration/metric-ir/1.0"},
+    "metric_ir_index": {"version": "1.0", "path": "v1/metric-ir-index.schema.json", "id": "https://databricks.example/bi-migration/metric-ir-index/1.0"},
+    "metric_scorecard": {"version": "1.0", "path": "v1/metric-scorecard.schema.json", "id": "https://databricks.example/bi-migration/metric-scorecard/1.0"},
+    "semantic_grouping_proposal": {"version": "1.0", "path": "v1/semantic-grouping-proposal.schema.json", "id": "https://databricks.example/bi-migration/semantic-grouping-proposal/1.0"},
+    "structured_finding": {"version": "1.0", "path": "v1/structured-finding.schema.json", "id": "https://databricks.example/bi-migration/structured-finding/1.0"},
+    "table_mapping_input": {"version": "1.0", "path": "v1/table-mapping-input.schema.json", "id": "https://databricks.example/bi-migration/table-mapping-input/1.0"},
+    "workflow_manifest": {"version": "1.0", "path": "v1/workflow-manifest.schema.json", "id": "https://databricks.example/bi-migration/workflow-manifest/1.0"}
+  }
+}

@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<datasource name="orders" caption="Orders">
+  <connection class="snowflake" server="example.snowflakecomputing.com" dbname="LEGACY_DW" schema="SALES">
+    <relation name="ORDERS" table="[LEGACY_DW].[SALES].[ORDERS]" type="table" />
+    <metadata-records>
+      <metadata-record class="column">
+        <local-name>[Order ID]</local-name>
+        <remote-name>ORDER_ID</remote-name>
+        <local-type>string</local-type>
+        <parent-name>[ORDERS]</parent-name>
+      </metadata-record>
+      <metadata-record class="column">
+        <local-name>[Sales]</local-name>
+        <remote-name>SALES</remote-name>
+        <local-type>real</local-type>
+        <parent-name>[ORDERS]</parent-name>
+      </metadata-record>
+    </metadata-records>
+  </connection>
+  <column caption="Profit Ratio" datatype="real" name="[Calculation_profit_ratio]" role="measure" type="quantitative">
+    <calculation class="tableau" formula="SUM([Profit]) / SUM([Sales])" />
+  </column>
+</datasource>

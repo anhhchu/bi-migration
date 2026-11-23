@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://databricks.example/bi-migration/evaluation-summary/1.0",
+  "title": "Metric View Evaluation Summary",
+  "type": "object",
+  "required": ["schema_version", "workflow_run_id", "group_id", "metric_view_fqn", "status", "evidence_strength", "blocking_findings", "warnings", "input_hashes", "created_at"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "workflow_run_id": {"type": "string"},
+    "group_id": {"type": "string"},
+    "metric_view_fqn": {"type": "string"},
+    "status": {"enum": ["PASS_EXACT", "PASS_WITH_TOLERANCE", "PASS_SOURCE_FIXTURE", "PASS_SEMANTIC_ONLY", "PASS_INVARIANTS_ONLY", "NOT_COMPARABLE_NO_SOURCE_DATA", "BLOCKED_UNRESOLVED_MAPPING", "BLOCKED_UNSAFE_GRAIN", "FAILED_SEMANTICS", "FAILED_VALUE", "EXCLUDED_UNSUPPORTED"]},
+    "evidence_strength": {"enum": ["EXACT", "SOURCE_FIXTURE", "SEMANTIC", "INVARIANT", "NONE"]},
+    "blocking_findings": {"type": "array", "items": {"type": "string"}},
+    "warnings": {"type": "array", "items": {"type": "string"}},
+    "input_hashes": {"type": "object"},
+    "created_at": {"type": "string", "format": "date-time"}
+  },
+  "additionalProperties": false
+}

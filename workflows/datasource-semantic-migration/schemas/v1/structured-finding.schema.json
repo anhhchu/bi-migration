@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://databricks.example/bi-migration/structured-finding/1.0",
+  "title": "Structured Evaluation Finding",
+  "type": "object",
+  "required": ["schema_version", "finding_id", "code", "severity", "owner", "status", "affected_objects", "expected_behavior", "evidence"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "finding_id": {"type": "string", "minLength": 1},
+    "code": {"type": "string", "minLength": 1},
+    "severity": {"enum": ["critical", "high", "medium", "low", "info"]},
+    "owner": {"enum": ["mapping", "base_view", "metric_view", "function", "unsupported"]},
+    "status": {"enum": ["OPEN", "REPAIRABLE", "NEEDS_SEMANTIC_TRANSLATION", "NOT_COMPARABLE", "RESOLVED", "UNRESOLVABLE_AUTOMATICALLY"]},
+    "affected_objects": {"type": "array", "items": {"type": "string"}},
+    "expected_behavior": {"type": "string"},
+    "evidence": {"type": "array", "items": {"type": "object"}},
+    "candidate_repair": {"type": ["object", "null"]}
+  },
+  "additionalProperties": false
+}

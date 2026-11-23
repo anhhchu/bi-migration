@@ -1,0 +1,85 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://databricks.example/bi-migration/input-inventory/1.0",
+  "title": "Datasource Input Inventory",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "workflow_run_id",
+    "created_at",
+    "generator",
+    "status",
+    "inventory_hash",
+    "datasources_path",
+    "mappings_path",
+    "extraction_root",
+    "summary",
+    "assets",
+    "mapping_files"
+  ],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "workflow_run_id": {"type": "string", "minLength": 1},
+    "created_at": {"type": "string", "format": "date-time"},
+    "generator": {
+      "type": "object",
+      "required": ["name", "version"],
+      "properties": {
+        "name": {"const": "datasource-semantic-migration"},
+        "version": {"type": "string", "minLength": 1}
+      },
+      "additionalProperties": false
+    },
+    "status": {"const": "COMPLETE"},
+    "inventory_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "datasources_path": {"type": "string", "minLength": 1},
+    "mappings_path": {"type": "string", "minLength": 1},
+    "extraction_root": {"type": "string", "minLength": 1},
+    "summary": {
+      "type": "object",
+      "required": [
+        "discovered_count",
+        "unique_count",
+        "duplicate_count",
+        "tds_count",
+        "tdsx_count",
+        "embedded_extract_count",
+        "mapping_file_count"
+      ]
+    },
+    "assets": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": [
+          "asset_id",
+          "relative_path",
+          "source_path",
+          "kind",
+          "byte_size",
+          "sha256",
+          "duplicate_of",
+          "tds_documents",
+          "archive_members",
+          "embedded_extracts"
+        ],
+        "properties": {
+          "asset_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "relative_path": {"type": "string", "minLength": 1},
+          "source_path": {"type": "string", "minLength": 1},
+          "kind": {"enum": ["TDS", "TDSX"]},
+          "byte_size": {"type": "integer", "minimum": 0},
+          "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "duplicate_of": {"type": ["string", "null"]},
+          "tds_documents": {"type": "array"},
+          "archive_members": {"type": "array"},
+          "embedded_extracts": {"type": "array"}
+        },
+        "additionalProperties": false
+      }
+    },
+    "mapping_files": {"type": "array"}
+  },
+  "additionalProperties": false
+}

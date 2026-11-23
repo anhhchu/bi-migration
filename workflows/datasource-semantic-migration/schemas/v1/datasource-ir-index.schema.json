@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://databricks.example/bi-migration/datasource-ir-index/1.0",
+  "title": "Datasource IR Index",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "workflow_run_id",
+    "created_at",
+    "inventory_path",
+    "inventory_hash",
+    "ir_root",
+    "status",
+    "summary",
+    "datasources",
+    "duplicates",
+    "parse_results",
+    "provenance"
+  ],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "workflow_run_id": {"type": "string", "minLength": 1},
+    "created_at": {"type": "string", "format": "date-time"},
+    "inventory_path": {"type": "string", "pattern": "^/Volumes/"},
+    "inventory_hash": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "ir_root": {"type": "string", "pattern": "^/Volumes/"},
+    "status": {"const": "COMPLETE"},
+    "summary": {
+      "type": "object",
+      "required": [
+        "package_count",
+        "datasource_count",
+        "duplicate_count",
+        "connection_count",
+        "relation_count",
+        "relationship_count",
+        "field_count",
+        "calculation_count",
+        "parameter_count",
+        "warning_count"
+      ]
+    },
+    "datasources": {"type": "array", "items": {"type": "object"}},
+    "duplicates": {"type": "array", "items": {"type": "object"}},
+    "parse_results": {"type": "array", "items": {"type": "string", "pattern": "^/Volumes/"}},
+    "provenance": {"type": "object"}
+  },
+  "additionalProperties": false
+}

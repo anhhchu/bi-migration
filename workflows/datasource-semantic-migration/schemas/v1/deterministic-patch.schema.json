@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://databricks.example/bi-migration/deterministic-patch/1.0",
+  "title": "Deterministic Repair Patch",
+  "type": "object",
+  "required": ["schema_version", "patch_id", "target", "operations", "preconditions", "expected_test_ids", "confidence", "provenance"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "patch_id": {"type": "string", "minLength": 1},
+    "target": {"enum": ["MAPPING_CONTRACT", "BASE_VIEW", "METRIC_VIEW", "GOVERNED_FUNCTION"]},
+    "operations": {"type": "array", "items": {"type": "object"}},
+    "preconditions": {"type": "array", "items": {"type": "object"}},
+    "expected_test_ids": {"type": "array", "items": {"type": ["string", "null"]}},
+    "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+    "provenance": {"type": "object"}
+  },
+  "additionalProperties": false
+}
