@@ -41,9 +41,15 @@ import {
   ExternalLink,
   FileUp,
   FileWarning,
+  FolderSearch,
+  History,
   Layers3,
+  Play,
   UserRound,
+  Wrench,
 } from 'lucide-react';
+
+type MigrationMode = 'semantic_model' | 'dashboard';
 
 type GroupSummary = {
   group_id: string;
@@ -156,6 +162,7 @@ type GroupDetail = {
 
 type UploadResponse = {
   migrationName: string;
+  migrationMode: MigrationMode;
   migrationRoot?: string | null;
   storage: string;
   uploadDestination: { fullName: string; path: string } | null;
@@ -167,6 +174,80 @@ type UploadResponse = {
     runId?: number | null;
     runUrl?: string | null;
   };
+};
+
+type SemanticRunGroup = {
+  group_id: string;
+  display_name: string;
+  group_path: string;
+  report_path?: string;
+  candidate_metric_view_fqn?: string;
+  status: string;
+  readiness?: string | null;
+  migrationStatus?: string | null;
+};
+
+type SemanticRun = {
+  runId: string;
+  runPath: string;
+  createdAt?: string | null;
+  inputVolumePath?: string | null;
+  status: string;
+  headline: string;
+  totals: Record<string, number>;
+  groups: SemanticRunGroup[];
+  reportPath: string;
+};
+
+type SemanticRunsResponse = {
+  root: string;
+  runs: SemanticRun[];
+  error?: string;
+  detail?: string;
+};
+
+type SemanticGroupReview = {
+  group: SemanticRunGroup;
+  sourceSummary?: {
+    grouping_rationale?: string;
+    datasource_count?: number;
+    target_tables?: string[];
+    datasources?: Array<{ datasource_name?: string; source_path?: string }>;
+  } | null;
+  migrationReview?: {
+    status?: string;
+    readiness?: string;
+    headline?: string;
+    candidate?: { metric_view_fqn?: string };
+    coverage?: {
+      semantic_coverage_percent?: number;
+      dimensions_created?: number;
+      measures_created?: number;
+      business_items_not_translated?: number;
+    };
+    recommended_actions?: Array<{ priority?: string; title?: string; description?: string; items?: string[] }>;
+  } | null;
+  repairReview?: {
+    status?: string;
+    readiness?: string;
+    headline?: string;
+    attempt?: number;
+    rolled_back?: boolean;
+    decision_reasons?: string[];
+    coverage_gates?: Array<{
+      key?: string;
+      label?: string;
+      definition?: string;
+      before?: number;
+      after?: number;
+      threshold?: number;
+      passed?: boolean;
+      gap_count?: number;
+    }>;
+    blocking_findings?: Array<{ source_name?: string; status?: string; recommended_action?: string }>;
+  } | null;
+  artifacts: Record<string, string>;
+  error?: string;
 };
 
 type SemanticWorkflowRun = {
@@ -187,7 +268,13 @@ type SemanticResults = {
   dashboardSummary: {
     status?: string;
     dashboards?: Array<{ dashboard_id?: string; display_name?: string; workbook_name?: string; url?: string | null }>;
-    findings?: Array<{ severity?: string; type?: string; detail?: string; resolution?: string; workbook_name?: string }>;
+    findings?: Array<{
+      severity?: string;
+      type?: string;
+      detail?: string;
+      resolution?: string;
+      workbook_name?: string;
+    }>;
   };
   metricView: { status?: string; metric_view_fqn?: string; dimension_count?: number; measure_count?: number };
   metricExceptions?: {
@@ -314,9 +401,10 @@ const issueLabels: Record<string, string> = {
 };
 
 export default function App() {
-  const [view, setView] = useState<'upload' | 'review'>(() =>
-    new URLSearchParams(window.location.search).get('view') === 'review' ? 'review' : 'upload'
-  );
+  const [view, setView] = useState<'upload' | 'review' | 'runs'>(() => {
+    const requestedView = new URLSearchParams(window.location.search).get('view');
+    return requestedView === 'review' || requestedView === 'runs' ? requestedView : 'upload';
+  });
   const [review, setReview] = useState<ReviewResponse | null>(null);
   const [selectedGroupId, setSelectedGroupId] = useState<string | null>(null);
   const [detail, setDetail] = useState<GroupDetail | null>(null);
@@ -439,7 +527,7 @@ export default function App() {
                 }}
               >
                 <span>1</span>
-                Upload assets
+                Start migration
               </button>
               <button
                 className={view === 'review' && !mappingOpen ? 'workflow-step workflow-step--active' : 'workflow-step'}
@@ -452,69 +540,82 @@ export default function App() {
                 <span>2</span>
                 Review groups
               </button>
+              <button
+                className={view === 'runs' ? 'workflow-step workflow-step--active' : 'workflow-step'}
+                type="button"
+                onClick={() => {
+                  setMappingOpen(false);
+                  setView('runs');
+                }}
+              >
+                <span>3</span>
+                Previous runs
+              </button>
             </nav>
           </aside>
 
           <main className="review-main">
-          <section className="page-intro">
-            <h2>Scale governed BI migration to Databricks</h2>
-            <p>
-              Inventory BI portfolios, standardize mappings and metrics, orchestrate migration waves, and validate AI/BI
-              outputs with traceable approvals.
-            </p>
-          </section>
+            <section className="page-intro">
+              <h2>Scale governed BI migration to Databricks</h2>
+              <p>
+                Inventory BI portfolios, standardize mappings and metrics, orchestrate migration waves, and validate
+                AI/BI outputs with traceable approvals.
+              </p>
+            </section>
 
-          {view === 'upload' ? (
-            <UploadPanel
-              onReview={() => {
-                void loadReview('uploaded').then(() => setView('review'));
-              }}
-            />
-          ) : null}
-          <div className="review-content" hidden={view !== 'review'}>
-            {error ? (
-              <Alert variant="destructive">
-                <AlertCircle className="size-4" />
-                <AlertTitle>Review data unavailable</AlertTitle>
-                <AlertDescription>{error}</AlertDescription>
-              </Alert>
-            ) : null}
-            {loading ? <LoadingState /> : null}
-            {!loading && review?.groups.length === 0 ? (
-              <EmptyMessage
-                title="No semantic groups"
-                description="Upload assets and run inventory before reviewing semantic groups."
+            {view === 'upload' ? (
+              <UploadPanel
+                onReview={() => {
+                  void loadReview('uploaded').then(() => setView('review'));
+                }}
+                onBrowseRuns={() => setView('runs')}
               />
             ) : null}
-            {!loading && review && review.groups.length > 0 ? (
-              mappingOpen && selectedGroup && detail ? (
-                <MappingWorkspace group={selectedGroup} detail={detail} onBack={() => setMappingOpen(false)} />
-              ) : (
-                <>
-                  <Alert className="run-context">
-                    <Layers3 className="size-4" />
-                    <AlertTitle>{review.run.label}</AlertTitle>
-                    <AlertDescription>{review.run.description}</AlertDescription>
-                  </Alert>
-                  <SummaryCards review={review} />
-                  <div className="review-workspace">
-                    <GroupTable
-                      groups={review.groups}
-                      evidence={review.groupEvidence}
-                      selectedGroupId={selectedGroupId}
-                      onSelect={setSelectedGroupId}
-                    />
-                    <GroupPanel
-                      group={selectedGroup}
-                      detail={detail}
-                      loading={detailLoading}
-                      onReviewMappings={() => setMappingOpen(true)}
-                    />
-                  </div>
-                </>
-              )
-            ) : null}
-          </div>
+            <div className="review-content" hidden={view !== 'review'}>
+              {error ? (
+                <Alert variant="destructive">
+                  <AlertCircle className="size-4" />
+                  <AlertTitle>Review data unavailable</AlertTitle>
+                  <AlertDescription>{error}</AlertDescription>
+                </Alert>
+              ) : null}
+              {loading ? <LoadingState /> : null}
+              {!loading && review?.groups.length === 0 ? (
+                <EmptyMessage
+                  title="No semantic groups"
+                  description="Upload assets and run inventory before reviewing semantic groups."
+                />
+              ) : null}
+              {!loading && review && review.groups.length > 0 ? (
+                mappingOpen && selectedGroup && detail ? (
+                  <MappingWorkspace group={selectedGroup} detail={detail} onBack={() => setMappingOpen(false)} />
+                ) : (
+                  <>
+                    <Alert className="run-context">
+                      <Layers3 className="size-4" />
+                      <AlertTitle>{review.run.label}</AlertTitle>
+                      <AlertDescription>{review.run.description}</AlertDescription>
+                    </Alert>
+                    <SummaryCards review={review} />
+                    <div className="review-workspace">
+                      <GroupTable
+                        groups={review.groups}
+                        evidence={review.groupEvidence}
+                        selectedGroupId={selectedGroupId}
+                        onSelect={setSelectedGroupId}
+                      />
+                      <GroupPanel
+                        group={selectedGroup}
+                        detail={detail}
+                        loading={detailLoading}
+                        onReviewMappings={() => setMappingOpen(true)}
+                      />
+                    </div>
+                  </>
+                )
+              ) : null}
+            </div>
+            {view === 'runs' ? <SemanticRunBrowser sessionUser={sessionUser} /> : null}
           </main>
         </div>
       </div>
@@ -522,7 +623,7 @@ export default function App() {
   );
 }
 
-function UploadPanel({ onReview }: { onReview: () => void }) {
+function UploadPanel({ onReview, onBrowseRuns }: { onReview: () => void; onBrowseRuns: () => void }) {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [uploads, setUploads] = useState<UploadResponse | null>(null);
   const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
@@ -530,6 +631,11 @@ function UploadPanel({ onReview }: { onReview: () => void }) {
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [selectedVolume, setSelectedVolume] = useState('');
   const [migrationName, setMigrationName] = useState('');
+  const [migrationMode, setMigrationMode] = useState<MigrationMode>('dashboard');
+  const [inputMethod, setInputMethod] = useState<'upload' | 'volume'>('upload');
+  const [datasourcePath, setDatasourcePath] = useState('');
+  const [mappingPath, setMappingPath] = useState('');
+  const [inspectedInputRoot, setInspectedInputRoot] = useState('');
   const [mappingPreview, setMappingPreview] = useState<{ name: string; content: string } | null>(null);
   const previewRows = useMemo(
     () => (mappingPreview?.name.toLowerCase().endsWith('.csv') ? parseCsv(mappingPreview.content) : []),
@@ -556,7 +662,7 @@ function UploadPanel({ onReview }: { onReview: () => void }) {
     const response = await fetch('/api/migration-context', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ name: migrationName }),
+      body: JSON.stringify({ name: migrationName, mode: migrationMode }),
     });
     const payload = (await response.json()) as { name?: string; error?: string };
     if (!response.ok || !payload.name) {
@@ -565,6 +671,26 @@ function UploadPanel({ onReview }: { onReview: () => void }) {
     }
     setMigrationName(payload.name);
     await loadUploads();
+  };
+
+  const inspectVolumeInputs = async () => {
+    setBusy(true);
+    setUploadError(null);
+    setInspectedInputRoot('');
+    try {
+      const response = await fetch('/api/volume-inputs/inspect', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ datasourcePath, mappingPath }),
+      });
+      const payload = (await response.json()) as { inputRoot?: string; error?: string };
+      if (!response.ok || !payload.inputRoot) throw new Error(payload.error ?? 'Could not inspect Volume inputs.');
+      setInspectedInputRoot(payload.inputRoot);
+    } catch (error) {
+      setUploadError(error instanceof Error ? error.message : 'Could not inspect Volume inputs.');
+    } finally {
+      setBusy(false);
+    }
   };
 
   useEffect(() => {
@@ -622,17 +748,25 @@ function UploadPanel({ onReview }: { onReview: () => void }) {
       const response = await fetch('/api/uploads/process', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ volume: selectedVolume }),
+        body: JSON.stringify({
+          volume: selectedVolume,
+          mode: migrationMode,
+          inputMethod,
+          datasourcePath,
+          mappingPath,
+        }),
       });
       const responseText = await response.text();
       let payload: { error?: string; detail?: string } = {};
       try {
         payload = JSON.parse(responseText) as { error?: string; detail?: string };
       } catch {
-        throw new Error(`Inventory request failed with HTTP ${response.status}.`);
+        throw new Error(`Migration request failed with HTTP ${response.status}.`);
       }
       if (!response.ok) {
-        throw new Error([payload.error, payload.detail].filter(Boolean).join(' ') || 'Could not start inventory processing.');
+        throw new Error(
+          [payload.error, payload.detail].filter(Boolean).join(' ') || 'Could not start inventory processing.'
+        );
       }
       await loadUploads();
     } catch (error) {
@@ -647,44 +781,137 @@ function UploadPanel({ onReview }: { onReview: () => void }) {
       <CardHeader>
         <CardTitle className="flex items-center gap-2">
           <FileUp className="size-5" />
-          Upload test assets
+          Start a migration
         </CardTitle>
       </CardHeader>
       <CardContent className="upload-content">
-        <div className="upload-dropzone">
-          <label htmlFor="tableau-files">Choose workbooks and mapping evidence</label>
-          <p>TWB/TWBX plus CSV, JSON, YAML, or Markdown mappings, up to 100 MB each.</p>
-          <input
-            ref={fileInputRef}
-            id="tableau-files"
-            type="file"
-            accept=".twb,.twbx,.csv,.json,.yaml,.yml,.md"
-            multiple
-            onChange={(event) => {
-              const addedFiles = Array.from(event.target.files ?? []);
-              setSelectedFiles((current) => {
-                const filesByIdentity = new Map(
-                  current.map((file) => [`${file.name}:${file.size}:${file.lastModified}`, file])
-                );
-                for (const file of addedFiles) {
-                  filesByIdentity.set(`${file.name}:${file.size}:${file.lastModified}`, file);
-                }
-                return Array.from(filesByIdentity.values());
-              });
-              event.target.value = '';
-            }}
-          />
-          <div className="upload-dropzone__actions">
-            <Button variant="outline" onClick={() => fileInputRef.current?.click()} disabled={busy}>
-              Choose files
-            </Button>
-          </div>
-          {selectedFiles.length > 0 ? (
-            <p className="upload-action-hint">
-              {selectedFiles.length} {selectedFiles.length === 1 ? 'file' : 'files'} selected
-            </p>
-          ) : null}
+        <div className="migration-start-grid">
+          <label>
+            Migration outcome
+            <select
+              value={migrationMode}
+              onChange={(event) => {
+                const nextMode = event.target.value as MigrationMode;
+                setMigrationMode(nextMode);
+                if (nextMode === 'dashboard') setInputMethod('upload');
+                setSelectedFiles([]);
+                setInspectedInputRoot('');
+              }}
+            >
+              <option value="semantic_model">Migrate semantic model only</option>
+              <option value="dashboard">Migrate dashboards</option>
+            </select>
+            <small>
+              {migrationMode === 'semantic_model'
+                ? 'Group Tableau datasources, create candidate Metric Views, evaluate, and repair.'
+                : 'Inventory Tableau workbooks, approve mappings, and create AI/BI dashboards.'}
+            </small>
+          </label>
+          <label>
+            Input method
+            <select
+              value={inputMethod}
+              onChange={(event) => {
+                setInputMethod(event.target.value as 'upload' | 'volume');
+                setInspectedInputRoot('');
+              }}
+            >
+              <option value="upload">Upload files</option>
+              {migrationMode === 'semantic_model' ? <option value="volume">Use existing Volume files</option> : null}
+            </select>
+            <small>Existing Volume files stay in place; the workflow reads them through Unity Catalog.</small>
+          </label>
         </div>
+        {inputMethod === 'upload' ? (
+          <div className="upload-dropzone">
+            <label htmlFor="tableau-files">
+              {migrationMode === 'semantic_model'
+                ? 'Choose datasources and mapping evidence'
+                : 'Choose workbooks and mapping evidence'}
+            </label>
+            <p>
+              {migrationMode === 'semantic_model'
+                ? 'TDS/TDSX plus table-mapping CSV or YAML, up to 100 MB each.'
+                : 'TWB/TWBX plus CSV, JSON, YAML, or Markdown mappings, up to 100 MB each.'}
+            </p>
+            <input
+              ref={fileInputRef}
+              id="tableau-files"
+              type="file"
+              accept={
+                migrationMode === 'semantic_model'
+                  ? '.tds,.tdsx,.csv,.yaml,.yml'
+                  : '.twb,.twbx,.csv,.json,.yaml,.yml,.md'
+              }
+              multiple
+              onChange={(event) => {
+                const addedFiles = Array.from(event.target.files ?? []);
+                setSelectedFiles((current) => {
+                  const filesByIdentity = new Map(
+                    current.map((file) => [`${file.name}:${file.size}:${file.lastModified}`, file])
+                  );
+                  for (const file of addedFiles) {
+                    filesByIdentity.set(`${file.name}:${file.size}:${file.lastModified}`, file);
+                  }
+                  return Array.from(filesByIdentity.values());
+                });
+                event.target.value = '';
+              }}
+            />
+            <div className="upload-dropzone__actions">
+              <Button variant="outline" onClick={() => fileInputRef.current?.click()} disabled={busy}>
+                Choose files
+              </Button>
+            </div>
+            {selectedFiles.length > 0 ? (
+              <p className="upload-action-hint">
+                {selectedFiles.length} {selectedFiles.length === 1 ? 'file' : 'files'} selected
+              </p>
+            ) : null}
+          </div>
+        ) : (
+          <div className="volume-input-card">
+            <div className="volume-input-card__heading">
+              <FolderSearch className="size-5" aria-hidden="true" />
+              <div>
+                <h3>Use existing Unity Catalog files</h3>
+                <p>Paste the full Volume paths. Both folders must share one parent input directory.</p>
+              </div>
+            </div>
+            <label>
+              Tableau datasource folder
+              <input
+                value={datasourcePath}
+                onChange={(event) => {
+                  setDatasourcePath(event.target.value);
+                  setInspectedInputRoot('');
+                }}
+                placeholder="/Volumes/catalog/schema/volume/project/datasources"
+              />
+            </label>
+            <label>
+              Mapping folder or file
+              <input
+                value={mappingPath}
+                onChange={(event) => {
+                  setMappingPath(event.target.value);
+                  setInspectedInputRoot('');
+                }}
+                placeholder="/Volumes/catalog/schema/volume/project/mappings/table-mapping.yaml"
+              />
+            </label>
+            <div className="volume-input-card__action">
+              <Button
+                variant="outline"
+                onClick={() => void inspectVolumeInputs()}
+                disabled={busy || !datasourcePath || !mappingPath}
+              >
+                Inspect paths
+              </Button>
+              {inspectedInputRoot ? <span>Ready: {inspectedInputRoot}</span> : <span>No files are copied.</span>}
+            </div>
+          </div>
+        )}
         {uploadError ? (
           <Alert variant="destructive">
             <AlertCircle className="size-4" />
@@ -692,145 +919,157 @@ function UploadPanel({ onReview }: { onReview: () => void }) {
             <AlertDescription>{uploadError}</AlertDescription>
           </Alert>
         ) : null}
-        <div className="upload-status">
-          <div>
-            <h3>Landing inventory</h3>
-            <p>{uploads?.storage ?? 'Loading storage status…'}</p>
-          </div>
-          <Badge variant="outline">
-            {uploads?.files.length ?? 0} uploaded
-            {selectedFiles.length > 0 ? ` · ${selectedFiles.length} selected` : ''}
-          </Badge>
-        </div>
-        <div className="upload-file-list">
-          {selectedFiles.map((file) => (
-            <div className="upload-file upload-file--pending" key={`pending-${file.name}-${file.lastModified}`}>
-              <span>
-                <strong>{file.name}</strong>
-                <small>Pending upload</small>
-              </span>
-              <span>{(file.size / 1024).toFixed(1)} KB</span>
-            </div>
-          ))}
-          {uploads?.files.map((file) => (
-            <div className="upload-file" key={file.name}>
-              <span>
-                {file.kind === 'Mapping evidence' ? (
-                  <button className="upload-file__preview" type="button" onClick={() => void previewMapping(file.name)}>
-                    {file.name}
-                  </button>
-                ) : (
-                  <strong>{file.name}</strong>
-                )}
-                <small>{file.kind}</small>
-                {file.volumePath ? <small className="upload-volume-path">{file.volumePath}</small> : null}
-              </span>
-              <span>{(file.sizeBytes / 1024).toFixed(1)} KB</span>
-            </div>
-          ))}
-        </div>
-        <Dialog open={mappingPreview !== null} onOpenChange={(open) => !open && setMappingPreview(null)}>
-          <DialogContent className="mapping-preview-dialog">
-            <DialogHeader>
-              <DialogTitle>{mappingPreview?.name ?? 'Mapping evidence'}</DialogTitle>
-              <DialogDescription>Uploaded mapping evidence</DialogDescription>
-            </DialogHeader>
-            {previewRows.length > 0 ? (
-              <div className="mapping-preview-table">
-                <Table>
-                  <TableHeader>
-                    <TableRow>
-                      {previewRows[0].map((heading) => (
-                        <TableHead key={heading}>{heading}</TableHead>
-                      ))}
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {previewRows.slice(1).map((row) => (
-                      <TableRow key={row.join('\u0000')}>
-                        {previewRows[0].map((heading, columnIndex) => (
-                          <TableCell key={heading}>{row[columnIndex] ?? ''}</TableCell>
-                        ))}
-                      </TableRow>
-                    ))}
-                  </TableBody>
-                </Table>
+        {inputMethod === 'upload' ? (
+          <>
+            <div className="upload-status">
+              <div>
+                <h3>Landing inventory</h3>
+                <p>{uploads?.storage ?? 'Loading storage status…'}</p>
               </div>
-            ) : (
-              <pre>{mappingPreview?.content}</pre>
-            )}
-            <DialogFooter>
-              <Button variant="outline" onClick={() => setMappingPreview(null)}>
-                Close
-              </Button>
-            </DialogFooter>
-          </DialogContent>
-        </Dialog>
-        <div>
-          <h3>Detected target namespaces</h3>
-          <p className="mapping-source-note">
-            Fully qualified Databricks tables are detected from uploaded mappings. Change the selection only to inspect an additional scope.
-          </p>
-          {uploads?.detectedNamespaces.length ? (
-            <div className="detected-namespaces" aria-label="Detected Databricks scopes">
-              {uploads.detectedNamespaces.map((namespace) => (
-                <Badge variant="outline" key={`${namespace.catalog}.${namespace.schema}`}>
-                  {namespace.catalog}.{namespace.schema}
-                </Badge>
+              <Badge variant="outline">
+                {uploads?.files.length ?? 0} uploaded
+                {selectedFiles.length > 0 ? ` · ${selectedFiles.length} selected` : ''}
+              </Badge>
+            </div>
+            <div className="upload-file-list">
+              {selectedFiles.map((file) => (
+                <div className="upload-file upload-file--pending" key={`pending-${file.name}-${file.lastModified}`}>
+                  <span>
+                    <strong>{file.name}</strong>
+                    <small>Pending upload</small>
+                  </span>
+                  <span>{(file.size / 1024).toFixed(1)} KB</span>
+                </div>
+              ))}
+              {uploads?.files.map((file) => (
+                <div className="upload-file" key={file.name}>
+                  <span>
+                    {file.kind === 'Mapping evidence' ? (
+                      <button
+                        className="upload-file__preview"
+                        type="button"
+                        onClick={() => void previewMapping(file.name)}
+                      >
+                        {file.name}
+                      </button>
+                    ) : (
+                      <strong>{file.name}</strong>
+                    )}
+                    <small>{file.kind}</small>
+                    {file.volumePath ? <small className="upload-volume-path">{file.volumePath}</small> : null}
+                  </span>
+                  <span>{(file.sizeBytes / 1024).toFixed(1)} KB</span>
+                </div>
               ))}
             </div>
-          ) : (
-            <p className="mapping-source-note">No Databricks scope detected from the uploaded files yet.</p>
-          )}
-        </div>
-        <div className="namespace-picker">
-          <div className="namespace-picker__heading">
-            <h3>Upload destination</h3>
-            <p>The app uploads assets to its authorized Unity Catalog Volume.</p>
-          </div>
-          <label>
-            Volume
-            <select value={selectedVolume} disabled={!selectedVolume}>
-              <option value="">Loading authorized Volume…</option>
-              {selectedVolume ? <option value={selectedVolume}>{selectedVolume}</option> : null}
-            </select>
-          </label>
-          <label>
-            Migration name
-            <input value={migrationName} onChange={(event) => setMigrationName(event.target.value)} />
-          </label>
-          <Button variant="outline" onClick={() => void applyMigrationName()} disabled={!migrationName.trim()}>
-            Use migration
-          </Button>
-        </div>
-        <div className="upload-destination-action">
-          <Button
-            onClick={() => void uploadFiles()}
-            disabled={busy || selectedFiles.length === 0 || !selectedVolume}
-          >
-            {busy
-              ? 'Uploading…'
-              : selectedFiles.length > 0
-                ? `Upload ${selectedFiles.length} ${selectedFiles.length === 1 ? 'file' : 'files'}`
-                : 'Upload files'}
-          </Button>
-          {selectedFiles.length > 0 && !selectedVolume ? (
-            <span>Choose a Volume to enable upload.</span>
-          ) : selectedVolume ? (
-            <span>Destination: /Volumes/{selectedVolume.split('.').join('/')}/bi-migrations/{migrationName || 'migration-name'}/</span>
-          ) : null}
-        </div>
+            <Dialog open={mappingPreview !== null} onOpenChange={(open) => !open && setMappingPreview(null)}>
+              <DialogContent className="mapping-preview-dialog">
+                <DialogHeader>
+                  <DialogTitle>{mappingPreview?.name ?? 'Mapping evidence'}</DialogTitle>
+                  <DialogDescription>Uploaded mapping evidence</DialogDescription>
+                </DialogHeader>
+                {previewRows.length > 0 ? (
+                  <div className="mapping-preview-table">
+                    <Table>
+                      <TableHeader>
+                        <TableRow>
+                          {previewRows[0].map((heading) => (
+                            <TableHead key={heading}>{heading}</TableHead>
+                          ))}
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        {previewRows.slice(1).map((row) => (
+                          <TableRow key={row.join('\u0000')}>
+                            {previewRows[0].map((heading, columnIndex) => (
+                              <TableCell key={heading}>{row[columnIndex] ?? ''}</TableCell>
+                            ))}
+                          </TableRow>
+                        ))}
+                      </TableBody>
+                    </Table>
+                  </div>
+                ) : (
+                  <pre>{mappingPreview?.content}</pre>
+                )}
+                <DialogFooter>
+                  <Button variant="outline" onClick={() => setMappingPreview(null)}>
+                    Close
+                  </Button>
+                </DialogFooter>
+              </DialogContent>
+            </Dialog>
+            <div>
+              <h3>Detected target namespaces</h3>
+              <p className="mapping-source-note">
+                Fully qualified Databricks tables are detected from uploaded mappings. Change the selection only to
+                inspect an additional scope.
+              </p>
+              {uploads?.detectedNamespaces.length ? (
+                <div className="detected-namespaces" aria-label="Detected Databricks scopes">
+                  {uploads.detectedNamespaces.map((namespace) => (
+                    <Badge variant="outline" key={`${namespace.catalog}.${namespace.schema}`}>
+                      {namespace.catalog}.{namespace.schema}
+                    </Badge>
+                  ))}
+                </div>
+              ) : (
+                <p className="mapping-source-note">No Databricks scope detected from the uploaded files yet.</p>
+              )}
+            </div>
+            <div className="namespace-picker">
+              <div className="namespace-picker__heading">
+                <h3>Upload destination</h3>
+                <p>The app uploads assets to its authorized Unity Catalog Volume.</p>
+              </div>
+              <label>
+                Volume
+                <select value={selectedVolume} disabled={!selectedVolume}>
+                  <option value="">Loading authorized Volume…</option>
+                  {selectedVolume ? <option value={selectedVolume}>{selectedVolume}</option> : null}
+                </select>
+              </label>
+              <label>
+                Migration name
+                <input value={migrationName} onChange={(event) => setMigrationName(event.target.value)} />
+              </label>
+              <Button variant="outline" onClick={() => void applyMigrationName()} disabled={!migrationName.trim()}>
+                Use migration
+              </Button>
+            </div>
+            <div className="upload-destination-action">
+              <Button
+                onClick={() => void uploadFiles()}
+                disabled={busy || selectedFiles.length === 0 || !selectedVolume}
+              >
+                {busy
+                  ? 'Uploading…'
+                  : selectedFiles.length > 0
+                    ? `Upload ${selectedFiles.length} ${selectedFiles.length === 1 ? 'file' : 'files'}`
+                    : 'Upload files'}
+              </Button>
+              {selectedFiles.length > 0 && !selectedVolume ? (
+                <span>Choose a Volume to enable upload.</span>
+              ) : selectedVolume ? (
+                <span>
+                  Destination: /Volumes/{selectedVolume.split('.').join('/')}/bi-migrations/
+                  {migrationName || 'migration-name'}/
+                </span>
+              ) : null}
+            </div>
+          </>
+        ) : null}
         <div className="upload-actions">
           <Button
             variant="outline"
             onClick={() => void processUploads()}
             disabled={
               busy ||
-              !uploads?.files.length ||
-              uploads.processing.status === 'running'
+              (inputMethod === 'upload' ? !uploads?.files.length : !inspectedInputRoot) ||
+              uploads?.processing.status === 'running'
             }
           >
-            Run inventory
+            {migrationMode === 'semantic_model' ? 'Propose semantic groups' : 'Run inventory'}
           </Button>
           <span>
             {uploads?.processing.message || 'Upload files, then run inventory and grouping.'}
@@ -844,10 +1083,415 @@ function UploadPanel({ onReview }: { onReview: () => void }) {
               </>
             ) : null}
           </span>
-          {uploads?.processing.status === 'complete' ? <Button onClick={onReview}>Review groups</Button> : null}
+          {uploads?.processing.status === 'complete' ? (
+            migrationMode === 'semantic_model' ? (
+              <Button onClick={onBrowseRuns}>Review semantic run</Button>
+            ) : (
+              <Button onClick={onReview}>Review groups</Button>
+            )
+          ) : null}
         </div>
       </CardContent>
     </Card>
+  );
+}
+
+function SemanticRunBrowser({ sessionUser }: { sessionUser: { displayName: string; userName: string } | null }) {
+  const [root, setRoot] = useState('');
+  const [runs, setRuns] = useState<SemanticRun[]>([]);
+  const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
+  const [selectedGroupId, setSelectedGroupId] = useState<string | null>(null);
+  const [groupReview, setGroupReview] = useState<SemanticGroupReview | null>(null);
+  const [loadingRuns, setLoadingRuns] = useState(true);
+  const [loadingGroup, setLoadingGroup] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [migrationRun, setMigrationRun] = useState<{ runId: number; runUrl?: string | null } | null>(null);
+
+  const loadRuns = async (requestedRoot?: string) => {
+    setLoadingRuns(true);
+    setActionError(null);
+    try {
+      const query = requestedRoot ? `?root=${encodeURIComponent(requestedRoot)}` : '';
+      const response = await fetch(`/api/semantic-runs${query}`);
+      const payload = (await response.json()) as SemanticRunsResponse;
+      if (!response.ok) throw new Error([payload.error, payload.detail].filter(Boolean).join(' '));
+      setRoot(payload.root);
+      setRuns(payload.runs ?? []);
+      setSelectedRunId((current) =>
+        current && payload.runs.some((run) => run.runId === current) ? current : (payload.runs[0]?.runId ?? null)
+      );
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : 'Could not load semantic workflow runs.');
+      setRuns([]);
+    } finally {
+      setLoadingRuns(false);
+    }
+  };
+
+  useEffect(() => {
+    void loadRuns();
+  }, []);
+
+  const selectedRun = useMemo(() => runs.find((run) => run.runId === selectedRunId) ?? null, [runs, selectedRunId]);
+
+  useEffect(() => {
+    const groups = selectedRun?.groups ?? [];
+    setSelectedGroupId((current) =>
+      current && groups.some((group) => group.group_id === current) ? current : (groups[0]?.group_id ?? null)
+    );
+  }, [selectedRun]);
+
+  useEffect(() => {
+    if (!selectedRunId || !selectedGroupId || !root) {
+      setGroupReview(null);
+      return;
+    }
+    const loadGroup = async () => {
+      setLoadingGroup(true);
+      setActionError(null);
+      try {
+        const response = await fetch(
+          `/api/semantic-runs/${selectedRunId}/groups/${selectedGroupId}?root=${encodeURIComponent(root)}`
+        );
+        const payload = (await response.json()) as SemanticGroupReview;
+        if (!response.ok) throw new Error(payload.error ?? 'Could not load semantic group review.');
+        setGroupReview(payload);
+      } catch (error) {
+        setGroupReview(null);
+        setActionError(error instanceof Error ? error.message : 'Could not load semantic group review.');
+      } finally {
+        setLoadingGroup(false);
+      }
+    };
+    void loadGroup();
+  }, [root, selectedRunId, selectedGroupId]);
+
+  const startMigration = async () => {
+    if (!selectedRunId) return;
+    setActionError(null);
+    const response = await fetch(`/api/semantic-runs/${selectedRunId}/migrate`, { method: 'POST' });
+    const payload = (await response.json()) as { runId?: number; runUrl?: string | null; error?: string };
+    if (!response.ok || !payload.runId) {
+      setActionError(payload.error ?? 'Could not start semantic migration.');
+      return;
+    }
+    setMigrationRun({ runId: payload.runId, runUrl: payload.runUrl });
+  };
+
+  return (
+    <section className="run-browser" aria-label="Previous semantic migration runs">
+      <Card className="workspace-card run-browser__header">
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <History className="size-5" aria-hidden="true" />
+            Previous semantic migrations
+          </CardTitle>
+        </CardHeader>
+        <CardContent className="run-browser__controls">
+          <label>
+            Workflow output folder
+            <input
+              value={root}
+              onChange={(event) => setRoot(event.target.value)}
+              placeholder="/Volumes/catalog/schema/volume/semantic_workflows"
+            />
+          </label>
+          <Button
+            variant="outline"
+            onClick={() => void loadRuns(root)}
+            disabled={loadingRuns || !root.startsWith('/Volumes/')}
+          >
+            {loadingRuns ? 'Loading…' : 'Load runs'}
+          </Button>
+          <p>Choose any retained run folder to reopen its groups, migration review, and latest repair report.</p>
+        </CardContent>
+      </Card>
+
+      {actionError ? (
+        <Alert variant="destructive">
+          <AlertCircle className="size-4" />
+          <AlertTitle>Run data unavailable</AlertTitle>
+          <AlertDescription>{actionError}</AlertDescription>
+        </Alert>
+      ) : null}
+
+      {loadingRuns ? <LoadingState /> : null}
+      {!loadingRuns && runs.length === 0 ? (
+        <EmptyMessage
+          title="No retained runs"
+          description="Check the workflow output folder or run semantic grouping first."
+        />
+      ) : null}
+      {!loadingRuns && runs.length > 0 ? (
+        <div className="run-browser__workspace">
+          <Card className="workspace-card run-list-card">
+            <CardHeader>
+              <CardTitle>Run folders</CardTitle>
+            </CardHeader>
+            <CardContent className="run-list">
+              {runs.map((run) => (
+                <button
+                  type="button"
+                  key={run.runId}
+                  className={run.runId === selectedRunId ? 'run-list__item run-list__item--selected' : 'run-list__item'}
+                  onClick={() => setSelectedRunId(run.runId)}
+                >
+                  <span>
+                    <strong>{run.runId}</strong>
+                    <small>{run.createdAt ? new Date(run.createdAt).toLocaleString() : 'Timestamp unavailable'}</small>
+                  </span>
+                  <Badge variant="outline">{run.status.replaceAll('_', ' ')}</Badge>
+                  <small>
+                    {run.groups.length} group{run.groups.length === 1 ? '' : 's'}
+                  </small>
+                </button>
+              ))}
+            </CardContent>
+          </Card>
+
+          <div className="run-browser__detail">
+            {selectedRun ? (
+              <Card className="workspace-card run-summary-card">
+                <CardHeader>
+                  <CardTitle>Run {selectedRun.runId}</CardTitle>
+                </CardHeader>
+                <CardContent>
+                  <p>{selectedRun.headline}</p>
+                  <dl className="run-summary-grid">
+                    <div>
+                      <dt>Status</dt>
+                      <dd>{selectedRun.status.replaceAll('_', ' ')}</dd>
+                    </div>
+                    <div>
+                      <dt>Semantic groups</dt>
+                      <dd>{selectedRun.groups.length}</dd>
+                    </div>
+                    <div>
+                      <dt>Input</dt>
+                      <dd title={selectedRun.inputVolumePath ?? undefined}>
+                        {selectedRun.inputVolumePath ?? 'Unavailable'}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>Report</dt>
+                      <dd title={selectedRun.reportPath}>{selectedRun.reportPath}</dd>
+                    </div>
+                  </dl>
+                  {selectedRun.status === 'GROUPING_REVIEW_REQUIRED' || selectedRun.status === 'AWAITING_APPROVAL' ? (
+                    <div className="run-migration-action">
+                      <Button onClick={() => void startMigration()}>
+                        <Play className="size-4" aria-hidden="true" />
+                        Migrate proposed groups
+                      </Button>
+                      <span>Approval is attributed to {sessionUser?.displayName ?? 'the signed-in user'}.</span>
+                    </div>
+                  ) : null}
+                  {migrationRun ? (
+                    <Alert>
+                      <CheckCircle2 className="size-4" />
+                      <AlertTitle>Semantic migration submitted</AlertTitle>
+                      <AlertDescription>
+                        Run {migrationRun.runId}{' '}
+                        {migrationRun.runUrl ? (
+                          <a className="job-run-link" href={migrationRun.runUrl} target="_blank" rel="noreferrer">
+                            View Job run <ExternalLink aria-hidden="true" />
+                          </a>
+                        ) : null}
+                      </AlertDescription>
+                    </Alert>
+                  ) : null}
+                </CardContent>
+              </Card>
+            ) : null}
+
+            {selectedRun?.groups.length ? (
+              <Card className="workspace-card">
+                <CardHeader>
+                  <CardTitle>Semantic groups</CardTitle>
+                </CardHeader>
+                <CardContent className="semantic-run-groups">
+                  {selectedRun.groups.map((group) => (
+                    <button
+                      type="button"
+                      key={group.group_id}
+                      className={
+                        group.group_id === selectedGroupId
+                          ? 'semantic-run-group semantic-run-group--selected'
+                          : 'semantic-run-group'
+                      }
+                      onClick={() => setSelectedGroupId(group.group_id)}
+                    >
+                      <span>
+                        <strong>{group.display_name}</strong>
+                        <small>{group.candidate_metric_view_fqn ?? 'Candidate not created'}</small>
+                      </span>
+                      <Badge variant="outline">{group.readiness ?? group.status.replaceAll('_', ' ')}</Badge>
+                    </button>
+                  ))}
+                </CardContent>
+              </Card>
+            ) : null}
+
+            {loadingGroup ? <DetailLoadingState /> : null}
+            {!loadingGroup && groupReview ? <SemanticGroupReviewPanel review={groupReview} /> : null}
+          </div>
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
+function SemanticGroupReviewPanel({ review }: { review: SemanticGroupReview }) {
+  const migration = review.migrationReview;
+  const repair = review.repairReview;
+  const gates = repair?.coverage_gates ?? [];
+  return (
+    <div className="semantic-review-stack">
+      <Card className="workspace-card">
+        <CardHeader>
+          <CardTitle>{review.group.display_name}</CardTitle>
+        </CardHeader>
+        <CardContent className="semantic-review-section">
+          <p>{review.sourceSummary?.grouping_rationale ?? 'Grouping rationale is unavailable.'}</p>
+          <div className="review-kpis">
+            <div>
+              <span>Datasources</span>
+              <strong>{review.sourceSummary?.datasource_count ?? '—'}</strong>
+            </div>
+            <div>
+              <span>Dimensions</span>
+              <strong>{migration?.coverage?.dimensions_created ?? '—'}</strong>
+            </div>
+            <div>
+              <span>Measures</span>
+              <strong>{migration?.coverage?.measures_created ?? '—'}</strong>
+            </div>
+            <div>
+              <span>Semantic coverage</span>
+              <strong>
+                {migration?.coverage?.semantic_coverage_percent !== undefined
+                  ? `${migration.coverage.semantic_coverage_percent}%`
+                  : '—'}
+              </strong>
+            </div>
+          </div>
+          <div className="artifact-path">
+            <span>Candidate Metric View</span>
+            <code>
+              {migration?.candidate?.metric_view_fqn ?? review.group.candidate_metric_view_fqn ?? 'Not created'}
+            </code>
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card className="workspace-card">
+        <CardHeader>
+          <CardTitle>Migration review</CardTitle>
+        </CardHeader>
+        <CardContent className="semantic-review-section">
+          {migration ? (
+            <>
+              <div className="review-status-line">
+                <Badge variant="outline">{migration.readiness ?? migration.status ?? 'UNKNOWN'}</Badge>
+                <span>{migration.headline}</span>
+              </div>
+              {(migration.recommended_actions ?? []).length ? (
+                <div className="review-action-list">
+                  {migration.recommended_actions?.map((action) => (
+                    <div key={`${action.priority}-${action.title}`}>
+                      <strong>{action.title}</strong>
+                      <p>{action.description}</p>
+                      <small>{action.items?.join(', ')}</small>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p>No migration actions were recorded.</p>
+              )}
+            </>
+          ) : (
+            <EmptyMessage
+              title="Migration review pending"
+              description="This group has not produced a migration review yet."
+            />
+          )}
+          <div className="artifact-path">
+            <span>Volume artifact</span>
+            <code>{review.artifacts.migrationReview}</code>
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card className="workspace-card">
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <Wrench className="size-5" aria-hidden="true" />
+            Metric View repair
+          </CardTitle>
+        </CardHeader>
+        <CardContent className="semantic-review-section">
+          {repair ? (
+            <>
+              <div className="review-status-line">
+                <Badge variant="outline">{repair.status ?? 'UNKNOWN'}</Badge>
+                <span>{repair.headline}</span>
+              </div>
+              <ul className="repair-decisions">
+                {(repair.decision_reasons ?? []).map((reason) => (
+                  <li key={reason}>{reason}</li>
+                ))}
+              </ul>
+              {gates.length ? (
+                <div className="repair-gate-table">
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead>Gate</TableHead>
+                        <TableHead>Before</TableHead>
+                        <TableHead>After</TableHead>
+                        <TableHead>Required</TableHead>
+                        <TableHead>Result</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {gates.map((gate) => (
+                        <TableRow key={gate.key ?? gate.label}>
+                          <TableCell>
+                            <strong>{gate.label}</strong>
+                            <small>{gate.definition}</small>
+                          </TableCell>
+                          <TableCell>
+                            {gate.before !== undefined ? `${(gate.before * 100).toFixed(1)}%` : '—'}
+                          </TableCell>
+                          <TableCell>{gate.after !== undefined ? `${(gate.after * 100).toFixed(1)}%` : '—'}</TableCell>
+                          <TableCell>
+                            {gate.threshold !== undefined ? `${(gate.threshold * 100).toFixed(1)}%` : '—'}
+                          </TableCell>
+                          <TableCell>
+                            <Badge variant="outline">
+                              {gate.passed ? 'Pass' : `Fail${gate.gap_count ? ` · ${gate.gap_count} short` : ''}`}
+                            </Badge>
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                </div>
+              ) : null}
+            </>
+          ) : (
+            <EmptyMessage
+              title="Repair report pending"
+              description="Repair has not run or the latest report is not available yet."
+            />
+          )}
+          <div className="artifact-path">
+            <span>Volume artifact</span>
+            <code>{review.artifacts.repairReview}</code>
+          </div>
+        </CardContent>
+      </Card>
+    </div>
   );
 }
 
@@ -1172,7 +1816,9 @@ function MappingWorkspace({ group, detail, onBack }: { group: GroupSummary; deta
   const [finalAgentName, setFinalAgentName] = useState('');
   const [promotionNotes, setPromotionNotes] = useState('');
   const [promotionBusy, setPromotionBusy] = useState(false);
-  const [gapDecisions, setGapDecisions] = useState<Record<string, { disposition: 'fix_now' | 'accept' | 'defer' | 'not_applicable'; notes: string }>>({});
+  const [gapDecisions, setGapDecisions] = useState<
+    Record<string, { disposition: 'fix_now' | 'accept' | 'defer' | 'not_applicable'; notes: string }>
+  >({});
   const [remediationBusy, setRemediationBusy] = useState(false);
   const [remediationPackage, setRemediationPackage] = useState<{
     dashboardPrompt: string;
@@ -1268,7 +1914,12 @@ function MappingWorkspace({ group, detail, onBack }: { group: GroupSummary; deta
       setFinalMetricViewFqn(
         payload.promotion?.final_metric_view_fqn ?? payload.manifest.candidate_metric_view_fqn ?? ''
       );
-      setFinalAgentName(payload.promotion?.final_agent_name ?? payload.agent.genie_agent?.name ?? payload.manifest.genie_agent_name ?? '');
+      setFinalAgentName(
+        payload.promotion?.final_agent_name ??
+          payload.agent.genie_agent?.name ??
+          payload.manifest.genie_agent_name ??
+          ''
+      );
     } catch (error) {
       setSemanticResultsError(error instanceof Error ? error.message : 'Semantic results could not be loaded.');
     } finally {
@@ -1287,7 +1938,7 @@ function MappingWorkspace({ group, detail, onBack }: { group: GroupSummary; deta
       });
       const payload = (await response.json()) as SemanticResults['promotion'] & { error?: string; detail?: string };
       if (!response.ok) throw new Error([payload.error, payload.detail].filter(Boolean).join(' '));
-      setSemanticResults((current) => current ? { ...current, promotion: payload } : current);
+      setSemanticResults((current) => (current ? { ...current, promotion: payload } : current));
     } catch (error) {
       setSemanticResultsError(error instanceof Error ? error.message : 'Promotion decision could not be saved.');
     } finally {
@@ -1323,7 +1974,9 @@ function MappingWorkspace({ group, detail, onBack }: { group: GroupSummary; deta
         detail?: string;
       };
       if (!response.ok || !payload.dashboardPrompt || !payload.metricPrompt || !payload.agentPrompt) {
-        throw new Error([payload.error, payload.detail].filter(Boolean).join(' ') || 'Remediation package is incomplete.');
+        throw new Error(
+          [payload.error, payload.detail].filter(Boolean).join(' ') || 'Remediation package is incomplete.'
+        );
       }
       setRemediationPackage({
         dashboardPrompt: payload.dashboardPrompt,
@@ -1498,7 +2151,10 @@ function MappingWorkspace({ group, detail, onBack }: { group: GroupSummary; deta
       !payload.semanticArtifacts ||
       !payload.jobSetup
     ) {
-      if (payload.detail?.includes('uses local paths') || payload.detail?.includes('Prepare the import package again')) {
+      if (
+        payload.detail?.includes('uses local paths') ||
+        payload.detail?.includes('Prepare the import package again')
+      ) {
         setApprovalStatus('mapping-approved');
         await approveMappings();
         return;
@@ -1529,11 +2185,11 @@ function MappingWorkspace({ group, detail, onBack }: { group: GroupSummary; deta
   const downloadContract = () => {
     if (!importPackage) return;
     const url = URL.createObjectURL(new Blob([importPackage.contractYaml], { type: 'application/yaml' }));
-      const link = document.createElement('a');
-      link.href = url;
-      link.download = importPackage.mappingFileName;
-      link.click();
-      URL.revokeObjectURL(url);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = importPackage.mappingFileName;
+    link.click();
+    URL.revokeObjectURL(url);
   };
 
   return (
@@ -1546,8 +2202,8 @@ function MappingWorkspace({ group, detail, onBack }: { group: GroupSummary; deta
         <div>
           <CardTitle>{group.display_name}</CardTitle>
           <p>
-            {datasourceFields.length} datasource fields to review · {detail.mappingContract.kpis?.length ?? 0}{' '}
-            workbook calculations and {detail.mappingContract.workbook_helpers?.length ?? 0} helper fields cataloged separately
+            {datasourceFields.length} datasource fields to review · {detail.mappingContract.kpis?.length ?? 0} workbook
+            calculations and {detail.mappingContract.workbook_helpers?.length ?? 0} helper fields cataloged separately
           </p>
         </div>
       </CardHeader>
@@ -1556,11 +2212,23 @@ function MappingWorkspace({ group, detail, onBack }: { group: GroupSummary; deta
           {[
             { id: 'mappings' as const, number: 3, label: 'Review mappings', disabled: false },
             { id: 'build' as const, number: 4, label: 'Build assets', disabled: false },
-            { id: 'validate' as const, number: 5, label: 'Review results', disabled: semanticRun?.resultState !== 'SUCCESS' },
-            { id: 'promote' as const, number: 6, label: 'Promote', disabled: !semanticResults?.audit.status?.startsWith('COMPLETE') },
+            {
+              id: 'validate' as const,
+              number: 5,
+              label: 'Review results',
+              disabled: semanticRun?.resultState !== 'SUCCESS',
+            },
+            {
+              id: 'promote' as const,
+              number: 6,
+              label: 'Promote',
+              disabled: !semanticResults?.audit.status?.startsWith('COMPLETE'),
+            },
           ].map((stage) => (
             <button
-              className={groupStage === stage.id ? 'group-workflow__step group-workflow__step--active' : 'group-workflow__step'}
+              className={
+                groupStage === stage.id ? 'group-workflow__step group-workflow__step--active' : 'group-workflow__step'
+              }
               type="button"
               disabled={stage.disabled}
               onClick={() => setGroupStage(stage.id)}
@@ -1572,171 +2240,179 @@ function MappingWorkspace({ group, detail, onBack }: { group: GroupSummary; deta
           ))}
         </nav>
         <div className="group-stage" hidden={groupStage !== 'mappings'}>
-        <div className="mapping-review-tabs" role="tablist" aria-label="Mapping review type">
-          <Button
-            variant={reviewMode === 'datasources' ? 'default' : 'outline'}
-            role="tab"
-            aria-selected={reviewMode === 'datasources'}
-            onClick={() => setReviewMode('datasources')}
-          >
-            Datasource mappings
-            <Badge className={reviewMode === 'datasources' ? 'mapping-tab-count--active' : undefined} variant="outline">
-              {datasourceFields.length}
-            </Badge>
-          </Button>
-          <Button
-            variant={reviewMode === 'relationships' ? 'default' : 'outline'}
-            role="tab"
-            aria-selected={reviewMode === 'relationships'}
-            onClick={() => setReviewMode('relationships')}
-          >
-            Relationships &amp; grain
-            <Badge className={reviewMode === 'relationships' ? 'mapping-tab-count--active' : undefined} variant="outline">
-              {detail.mappingContract.relationships?.length ?? 0}
-            </Badge>
-          </Button>
-          <Button
-            variant={reviewMode === 'derived' ? 'default' : 'outline'}
-            role="tab"
-            aria-selected={reviewMode === 'derived'}
-            onClick={() => setReviewMode('derived')}
-          >
-            Derived logic
-            <Badge className={reviewMode === 'derived' ? 'mapping-tab-count--active' : undefined} variant="outline">
-              {(detail.mappingContract.kpis?.length ?? 0) + (detail.mappingContract.workbook_helpers?.length ?? 0)}
-            </Badge>
-          </Button>
-        </div>
-        <div className="mapping-review-pane" hidden={reviewMode !== 'datasources'}>
-        <p className="mapping-source-note">
-          {targets
-            ? `Targets loaded from the ${targets.identity}; physical validation runs in the inventory notebook.`
-            : 'Upload mapping evidence with fully qualified Databricks targets.'}
-        </p>
-        <div className="mapping-groups">
-          {groupedFields.map(([status, fields]) => (
-            <details
-              className={`mapping-status-group mapping-status-group--${status}`}
-              key={status}
-              open={expandedStatuses.has(status)}
-              onToggle={(event) => {
-                const open = event.currentTarget.open;
-                setExpandedStatuses((current) => {
-                  if (current.has(status) === open) return current;
-                  const next = new Set(current);
-                  if (open) next.add(status);
-                  else next.delete(status);
-                  return next;
-                });
-              }}
+          <div className="mapping-review-tabs" role="tablist" aria-label="Mapping review type">
+            <Button
+              variant={reviewMode === 'datasources' ? 'default' : 'outline'}
+              role="tab"
+              aria-selected={reviewMode === 'datasources'}
+              onClick={() => setReviewMode('datasources')}
             >
-              <summary className="mapping-status-group__header">
-                <h3>
-                  <span aria-hidden="true" />
-                  {mappingStatusLabels[status]}
-                </h3>
-                <Badge variant="outline">{fields.length}</Badge>
-              </summary>
-              <div className="mapping-list">
-                {fields.map((field) => {
-                  const fieldKey = `${field.datasource}-${field.legacy}`;
-                  return (
-                    <MappingEditorCard
-                      key={`${fieldKey}-${targets ? 'ready' : 'loading'}`}
-                      field={field}
-                      group={group}
-                      targets={targets}
-                      status={status}
-                      onSaved={() => setSavedFields((current) => new Set(current).add(fieldKey))}
-                      usageLabel={field.assets?.join(', ') || 'Workbook usage unavailable'}
-                    />
-                  );
-                })}
-              </div>
-            </details>
-          ))}
-        </div>
-        <section className="mapping-graph-section">
-          <div className="section-heading">
-            <div>
-              <h3>Mapping graph</h3>
-              <p>Source tables and fields mapped to this group’s Databricks targets.</p>
-            </div>
+              Datasource mappings
+              <Badge
+                className={reviewMode === 'datasources' ? 'mapping-tab-count--active' : undefined}
+                variant="outline"
+              >
+                {datasourceFields.length}
+              </Badge>
+            </Button>
+            <Button
+              variant={reviewMode === 'relationships' ? 'default' : 'outline'}
+              role="tab"
+              aria-selected={reviewMode === 'relationships'}
+              onClick={() => setReviewMode('relationships')}
+            >
+              Relationships &amp; grain
+              <Badge
+                className={reviewMode === 'relationships' ? 'mapping-tab-count--active' : undefined}
+                variant="outline"
+              >
+                {detail.mappingContract.relationships?.length ?? 0}
+              </Badge>
+            </Button>
+            <Button
+              variant={reviewMode === 'derived' ? 'default' : 'outline'}
+              role="tab"
+              aria-selected={reviewMode === 'derived'}
+              onClick={() => setReviewMode('derived')}
+            >
+              Derived logic
+              <Badge className={reviewMode === 'derived' ? 'mapping-tab-count--active' : undefined} variant="outline">
+                {(detail.mappingContract.kpis?.length ?? 0) + (detail.mappingContract.workbook_helpers?.length ?? 0)}
+              </Badge>
+            </Button>
           </div>
-          <MappingGraph fields={datasourceFields} relationships={detail.mappingContract.relationships ?? []} />
-        </section>
-        </div>
-        <div className="mapping-review-pane" hidden={reviewMode !== 'relationships'}>
-          <Alert>
-            <Layers3 className="size-4" />
-            <AlertTitle>Resolve relationships and grain</AlertTitle>
-            <AlertDescription>
-              For each unresolved item: select the two Databricks tables, confirm cardinality, enter the join
-              condition, then add any as-of predicates and current-record filters required by the target grains.
-              Apply the relationship to remove the approval blocker. The approved mapping YAML is updated automatically.
-            </AlertDescription>
-          </Alert>
-          <div className="relationship-list">
-            {(detail.mappingContract.relationships ?? []).map((relationship, index) => (
-              <RelationshipEditor
-                key={`${relationship.datasource}-${index}`}
-                relationship={relationship}
-                relationshipIndex={index}
-                group={group}
-                targetTables={targets?.tables.map((table) => table.fullName) ?? []}
-                saved={savedRelationships.has(index)}
-                onSaved={() => setSavedRelationships((current) => new Set(current).add(index))}
-              />
-            ))}
-            {(detail.mappingContract.relationships?.length ?? 0) === 0 ? <p>No source relationships were found.</p> : null}
-          </div>
-        </div>
-        <div className="mapping-review-pane" hidden={reviewMode !== 'derived'}>
-          <Alert>
-            <Layers3 className="size-4" />
-            <AlertTitle>Derived from the workbook</AlertTitle>
-            <AlertDescription>
-              These calculations and UI objects are converted after datasource mappings are approved. Users do not map
-              them to physical Databricks columns.
-            </AlertDescription>
-          </Alert>
-          <section className="derived-section">
-            <div className="section-heading">
-              <h3>KPI calculations</h3>
-              <Badge variant="outline">{detail.mappingContract.kpis?.length ?? 0}</Badge>
-            </div>
-            <div className="derived-list">
-              {detail.mappingContract.kpis?.map((kpi) => (
-                <details key={`${kpi.legacy_name}-${kpi.legacy_expression}`}>
-                  <summary>
-                    <strong>{kpi.legacy_name}</strong>
-                    <Badge variant="outline">Derived</Badge>
+          <div className="mapping-review-pane" hidden={reviewMode !== 'datasources'}>
+            <p className="mapping-source-note">
+              {targets
+                ? `Targets loaded from the ${targets.identity}; physical validation runs in the inventory notebook.`
+                : 'Upload mapping evidence with fully qualified Databricks targets.'}
+            </p>
+            <div className="mapping-groups">
+              {groupedFields.map(([status, fields]) => (
+                <details
+                  className={`mapping-status-group mapping-status-group--${status}`}
+                  key={status}
+                  open={expandedStatuses.has(status)}
+                  onToggle={(event) => {
+                    const open = event.currentTarget.open;
+                    setExpandedStatuses((current) => {
+                      if (current.has(status) === open) return current;
+                      const next = new Set(current);
+                      if (open) next.add(status);
+                      else next.delete(status);
+                      return next;
+                    });
+                  }}
+                >
+                  <summary className="mapping-status-group__header">
+                    <h3>
+                      <span aria-hidden="true" />
+                      {mappingStatusLabels[status]}
+                    </h3>
+                    <Badge variant="outline">{fields.length}</Badge>
                   </summary>
-                  <code>{kpi.legacy_expression}</code>
-                  <p>Used in {kpi.assets?.join(', ') || 'workbook'}</p>
-                  {kpi.aliases && kpi.aliases.length > 1 ? <p>Aliases: {kpi.aliases.join(', ')}</p> : null}
+                  <div className="mapping-list">
+                    {fields.map((field) => {
+                      const fieldKey = `${field.datasource}-${field.legacy}`;
+                      return (
+                        <MappingEditorCard
+                          key={`${fieldKey}-${targets ? 'ready' : 'loading'}`}
+                          field={field}
+                          group={group}
+                          targets={targets}
+                          status={status}
+                          onSaved={() => setSavedFields((current) => new Set(current).add(fieldKey))}
+                          usageLabel={field.assets?.join(', ') || 'Workbook usage unavailable'}
+                        />
+                      );
+                    })}
+                  </div>
                 </details>
               ))}
             </div>
-          </section>
-          <section className="derived-section">
-            <div className="section-heading">
-              <h3>Workbook UI objects</h3>
-              <Badge variant="outline">{detail.mappingContract.workbook_helpers?.length ?? 0}</Badge>
-            </div>
-            <p className="mapping-source-note">
-              Parameters, navigation menus, extract replicas, annotations, groups, bins, and clipboard controls are
-              preserved or redesigned by the conversion process.
-            </p>
-            <div className="helper-chip-list">
-              {detail.mappingContract.workbook_helpers?.map((helper) => (
-                <Badge variant="outline" key={`${helper.name}-${helper.assets?.join('|')}`}>
-                  {helper.name}
-                </Badge>
+            <section className="mapping-graph-section">
+              <div className="section-heading">
+                <div>
+                  <h3>Mapping graph</h3>
+                  <p>Source tables and fields mapped to this group’s Databricks targets.</p>
+                </div>
+              </div>
+              <MappingGraph fields={datasourceFields} relationships={detail.mappingContract.relationships ?? []} />
+            </section>
+          </div>
+          <div className="mapping-review-pane" hidden={reviewMode !== 'relationships'}>
+            <Alert>
+              <Layers3 className="size-4" />
+              <AlertTitle>Resolve relationships and grain</AlertTitle>
+              <AlertDescription>
+                For each unresolved item: select the two Databricks tables, confirm cardinality, enter the join
+                condition, then add any as-of predicates and current-record filters required by the target grains. Apply
+                the relationship to remove the approval blocker. The approved mapping YAML is updated automatically.
+              </AlertDescription>
+            </Alert>
+            <div className="relationship-list">
+              {(detail.mappingContract.relationships ?? []).map((relationship, index) => (
+                <RelationshipEditor
+                  key={`${relationship.datasource}-${index}`}
+                  relationship={relationship}
+                  relationshipIndex={index}
+                  group={group}
+                  targetTables={targets?.tables.map((table) => table.fullName) ?? []}
+                  saved={savedRelationships.has(index)}
+                  onSaved={() => setSavedRelationships((current) => new Set(current).add(index))}
+                />
               ))}
+              {(detail.mappingContract.relationships?.length ?? 0) === 0 ? (
+                <p>No source relationships were found.</p>
+              ) : null}
             </div>
-          </section>
-        </div>
+          </div>
+          <div className="mapping-review-pane" hidden={reviewMode !== 'derived'}>
+            <Alert>
+              <Layers3 className="size-4" />
+              <AlertTitle>Derived from the workbook</AlertTitle>
+              <AlertDescription>
+                These calculations and UI objects are converted after datasource mappings are approved. Users do not map
+                them to physical Databricks columns.
+              </AlertDescription>
+            </Alert>
+            <section className="derived-section">
+              <div className="section-heading">
+                <h3>KPI calculations</h3>
+                <Badge variant="outline">{detail.mappingContract.kpis?.length ?? 0}</Badge>
+              </div>
+              <div className="derived-list">
+                {detail.mappingContract.kpis?.map((kpi) => (
+                  <details key={`${kpi.legacy_name}-${kpi.legacy_expression}`}>
+                    <summary>
+                      <strong>{kpi.legacy_name}</strong>
+                      <Badge variant="outline">Derived</Badge>
+                    </summary>
+                    <code>{kpi.legacy_expression}</code>
+                    <p>Used in {kpi.assets?.join(', ') || 'workbook'}</p>
+                    {kpi.aliases && kpi.aliases.length > 1 ? <p>Aliases: {kpi.aliases.join(', ')}</p> : null}
+                  </details>
+                ))}
+              </div>
+            </section>
+            <section className="derived-section">
+              <div className="section-heading">
+                <h3>Workbook UI objects</h3>
+                <Badge variant="outline">{detail.mappingContract.workbook_helpers?.length ?? 0}</Badge>
+              </div>
+              <p className="mapping-source-note">
+                Parameters, navigation menus, extract replicas, annotations, groups, bins, and clipboard controls are
+                preserved or redesigned by the conversion process.
+              </p>
+              <div className="helper-chip-list">
+                {detail.mappingContract.workbook_helpers?.map((helper) => (
+                  <Badge variant="outline" key={`${helper.name}-${helper.assets?.join('|')}`}>
+                    {helper.name}
+                  </Badge>
+                ))}
+              </div>
+            </section>
+          </div>
         </div>
         <section className="mapping-approval-action" hidden={groupStage !== 'build'}>
           <div>
@@ -1749,13 +2425,12 @@ function MappingWorkspace({ group, detail, onBack }: { group: GroupSummary; deta
           </div>
           {approvalStatus === 'approved' ? (
             <div className="mapping-draft-action">
-              <Button variant="outline" onClick={() => void openImportPackage()}>Open mapping package</Button>
+              <Button variant="outline" onClick={() => void openImportPackage()}>
+                Open mapping package
+              </Button>
             </div>
           ) : (
-            <Button
-              onClick={() => void approveMappings()}
-              disabled={approvalBusy || totalBlockingCount > 0}
-            >
+            <Button onClick={() => void approveMappings()} disabled={approvalBusy || totalBlockingCount > 0}>
               {approvalBusy
                 ? 'Preparing…'
                 : approvalStatus === 'mapping-approved'
@@ -1788,7 +2463,10 @@ function MappingWorkspace({ group, detail, onBack }: { group: GroupSummary; deta
         <section className="build-assets-stage" hidden={groupStage !== 'build'}>
           <div className="build-stage-intro">
             <h3>Build Databricks assets</h3>
-            <p>Run Dashboard Import first. When it succeeds, run Semantic Build to create and validate the Metric View and Genie Agent.</p>
+            <p>
+              Run Dashboard Import first. When it succeeds, run Semantic Build to create and validate the Metric View
+              and Genie Agent.
+            </p>
           </div>
           {importPackage?.jobSetup ? (
             <Alert>
@@ -1801,37 +2479,87 @@ function MappingWorkspace({ group, detail, onBack }: { group: GroupSummary; deta
           ) : null}
           <section className="workflow-job">
             <div className="workflow-job-heading">
-              <div className="workflow-job-title"><span>1</span><div><strong>Dashboard Import</strong><p>Convert this workbook group with `/importBI`.</p></div></div>
+              <div className="workflow-job-title">
+                <span>1</span>
+                <div>
+                  <strong>Dashboard Import</strong>
+                  <p>Convert this workbook group with `/importBI`.</p>
+                </div>
+              </div>
               <div className="workflow-job-actions">
-                {importPackage?.jobSetup.jobs[0]?.jobUrl ? <a className="job-run-link" href={importPackage.jobSetup.jobs[0].jobUrl ?? undefined} target="_blank" rel="noreferrer">Open Job <ExternalLink aria-hidden="true" /></a> : null}
-                {dashboardRun?.runUrl ? <a className="job-run-link" href={dashboardRun.runUrl} target="_blank" rel="noreferrer">View run <ExternalLink aria-hidden="true" /></a> : null}
-                <Button onClick={() => void startDashboardImport()} disabled={dashboardRunBusy || approvalStatus !== 'approved'}>
+                {importPackage?.jobSetup.jobs[0]?.jobUrl ? (
+                  <a
+                    className="job-run-link"
+                    href={importPackage.jobSetup.jobs[0].jobUrl ?? undefined}
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    Open Job <ExternalLink aria-hidden="true" />
+                  </a>
+                ) : null}
+                {dashboardRun?.runUrl ? (
+                  <a className="job-run-link" href={dashboardRun.runUrl} target="_blank" rel="noreferrer">
+                    View run <ExternalLink aria-hidden="true" />
+                  </a>
+                ) : null}
+                <Button
+                  onClick={() => void startDashboardImport()}
+                  disabled={dashboardRunBusy || approvalStatus !== 'approved'}
+                >
                   {dashboardRunBusy ? 'Starting…' : dashboardRun ? 'Run again' : 'Run Dashboard Import'}
                 </Button>
               </div>
             </div>
-            {importPackage?.jobSetup.jobs[0]?.tasks.map((task) => <JobPrompt key={task.taskKey} task={task} />)}
+            {importPackage?.jobSetup.jobs[0]?.tasks.map((task) => (
+              <JobPrompt key={task.taskKey} task={task} />
+            ))}
             {dashboardRun ? (
               <JobRunSummary run={dashboardRun} runningLabel="Import is running" />
-            ) : <p className="workflow-job-empty">Approve the mappings, then run Dashboard Import.</p>}
+            ) : (
+              <p className="workflow-job-empty">Approve the mappings, then run Dashboard Import.</p>
+            )}
           </section>
           <section className="workflow-job">
             <div className="workflow-job-heading">
-              <div className="workflow-job-title"><span>2</span><div><strong>Semantic Build</strong><p>Create the Metric View, validate it, then create the Genie Agent.</p></div></div>
+              <div className="workflow-job-title">
+                <span>2</span>
+                <div>
+                  <strong>Semantic Build</strong>
+                  <p>Create the Metric View, validate it, then create the Genie Agent.</p>
+                </div>
+              </div>
               <div className="workflow-job-actions">
-                {importPackage?.jobSetup.jobs[1]?.jobUrl ? <a className="job-run-link" href={importPackage.jobSetup.jobs[1].jobUrl ?? undefined} target="_blank" rel="noreferrer">Open Job <ExternalLink aria-hidden="true" /></a> : null}
-                {semanticRun?.runUrl ? <a className="job-run-link" href={semanticRun.runUrl} target="_blank" rel="noreferrer">View run <ExternalLink aria-hidden="true" /></a> : null}
-                <Button onClick={() => void startSemanticWorkflow()} disabled={semanticRunBusy || dashboardRun?.resultState !== 'SUCCESS'}>
+                {importPackage?.jobSetup.jobs[1]?.jobUrl ? (
+                  <a
+                    className="job-run-link"
+                    href={importPackage.jobSetup.jobs[1].jobUrl ?? undefined}
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    Open Job <ExternalLink aria-hidden="true" />
+                  </a>
+                ) : null}
+                {semanticRun?.runUrl ? (
+                  <a className="job-run-link" href={semanticRun.runUrl} target="_blank" rel="noreferrer">
+                    View run <ExternalLink aria-hidden="true" />
+                  </a>
+                ) : null}
+                <Button
+                  onClick={() => void startSemanticWorkflow()}
+                  disabled={semanticRunBusy || dashboardRun?.resultState !== 'SUCCESS'}
+                >
                   {semanticRunBusy ? 'Starting…' : semanticRun ? 'Run again' : 'Run Semantic Build'}
                 </Button>
               </div>
             </div>
-            {importPackage?.jobSetup.jobs[1]?.tasks.map((task) => <JobPrompt key={task.taskKey} task={task} />)}
-          {semanticRun ? (
-            <JobRunSummary run={semanticRun} runningLabel="Workflow is running" />
-          ) : (
-            <p className="workflow-job-empty">Complete Dashboard Import successfully to unlock this job.</p>
-          )}
+            {importPackage?.jobSetup.jobs[1]?.tasks.map((task) => (
+              <JobPrompt key={task.taskKey} task={task} />
+            ))}
+            {semanticRun ? (
+              <JobRunSummary run={semanticRun} runningLabel="Workflow is running" />
+            ) : (
+              <p className="workflow-job-empty">Complete Dashboard Import successfully to unlock this job.</p>
+            )}
           </section>
         </section>
         <section className="build-assets-stage" hidden={groupStage !== 'validate'}>
@@ -1853,32 +2581,70 @@ function MappingWorkspace({ group, detail, onBack }: { group: GroupSummary; deta
                 <section className="workflow-job">
                   <Badge variant="outline">{semanticResults.metricView.status ?? 'UNKNOWN'}</Badge>
                   <h4>Metric View</h4>
-                  <code>{semanticResults.metricView.metric_view_fqn ?? semanticResults.manifest.candidate_metric_view_fqn}</code>
-                  <p>{semanticResults.metricView.measure_count ?? '—'} measures · {semanticResults.metricView.dimension_count ?? '—'} dimensions</p>
-                  {semanticResults.links?.metricView ? <a className="job-run-link" href={semanticResults.links.metricView} target="_blank" rel="noreferrer">Open Metric View <ExternalLink aria-hidden="true" /></a> : null}
+                  <code>
+                    {semanticResults.metricView.metric_view_fqn ?? semanticResults.manifest.candidate_metric_view_fqn}
+                  </code>
+                  <p>
+                    {semanticResults.metricView.measure_count ?? '—'} measures ·{' '}
+                    {semanticResults.metricView.dimension_count ?? '—'} dimensions
+                  </p>
+                  {semanticResults.links?.metricView ? (
+                    <a
+                      className="job-run-link"
+                      href={semanticResults.links.metricView}
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      Open Metric View <ExternalLink aria-hidden="true" />
+                    </a>
+                  ) : null}
                 </section>
                 <section className="workflow-job">
                   <Badge variant="outline">{semanticResults.agent.status ?? 'UNKNOWN'}</Badge>
                   <h4>Genie Agent</h4>
                   <strong>{semanticResults.agent.genie_agent?.name}</strong>
-                  <p>Space ID: <code>{semanticResults.agent.genie_agent?.space_id}</code></p>
-                  {semanticResults.links?.genieAgent ? <a className="job-run-link" href={semanticResults.links.genieAgent} target="_blank" rel="noreferrer">Open Genie Agent <ExternalLink aria-hidden="true" /></a> : null}
+                  <p>
+                    Space ID: <code>{semanticResults.agent.genie_agent?.space_id}</code>
+                  </p>
+                  {semanticResults.links?.genieAgent ? (
+                    <a
+                      className="job-run-link"
+                      href={semanticResults.links.genieAgent}
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      Open Genie Agent <ExternalLink aria-hidden="true" />
+                    </a>
+                  ) : null}
                 </section>
                 <section className="workflow-job">
                   <Badge variant="outline">{semanticResults.audit.status ?? 'UNKNOWN'}</Badge>
                   <h4>Migration gaps</h4>
                   <strong>{migrationGaps.filter((gap) => gap.severity !== 'info').length} require review</strong>
-                  <p>{migrationGaps.filter((gap) => gap.severity === 'high').length} high · {migrationGaps.filter((gap) => gap.severity === 'medium').length} medium · {migrationGaps.filter((gap) => gap.severity === 'low').length} low</p>
+                  <p>
+                    {migrationGaps.filter((gap) => gap.severity === 'high').length} high ·{' '}
+                    {migrationGaps.filter((gap) => gap.severity === 'medium').length} medium ·{' '}
+                    {migrationGaps.filter((gap) => gap.severity === 'low').length} low
+                  </p>
                 </section>
               </div>
               <section className="workflow-job">
                 <div className="section-heading">
-                  <div><h4>Migrated dashboards</h4><p>Open each reconciled AI/BI dashboard in the workspace.</p></div>
+                  <div>
+                    <h4>Migrated dashboards</h4>
+                    <p>Open each reconciled AI/BI dashboard in the workspace.</p>
+                  </div>
                   <Badge variant="outline">{semanticResults.dashboardSummary.dashboards?.length ?? 0}</Badge>
                 </div>
                 <div className="semantic-dashboard-links">
                   {semanticResults.dashboardSummary.dashboards?.map((dashboard) => (
-                    <a className="job-run-link" href={dashboard.url ?? undefined} target="_blank" rel="noreferrer" key={dashboard.dashboard_id}>
+                    <a
+                      className="job-run-link"
+                      href={dashboard.url ?? undefined}
+                      target="_blank"
+                      rel="noreferrer"
+                      key={dashboard.dashboard_id}
+                    >
                       {dashboard.display_name ?? dashboard.workbook_name ?? dashboard.dashboard_id}
                       <ExternalLink aria-hidden="true" />
                     </a>
@@ -1888,50 +2654,66 @@ function MappingWorkspace({ group, detail, onBack }: { group: GroupSummary; deta
               {migrationGaps.length ? (
                 <section className="workflow-job">
                   <h4>Migration gaps to review</h4>
-                  <p>Gaps identified while creating dashboards, consolidating the Metric View, and configuring the Genie Agent.</p>
+                  <p>
+                    Gaps identified while creating dashboards, consolidating the Metric View, and configuring the Genie
+                    Agent.
+                  </p>
                   <div className="benchmark-findings">
                     {migrationGaps.map((gap) => (
-                        <article key={gap.key}>
-                          <Badge variant="outline">{gap.severity}</Badge>
-                          <strong>{gap.stage}: {gap.type.replaceAll('_', ' ')}</strong>
-                          <p>{gap.asset ? `${gap.asset}: ` : ''}{gap.detail}</p>
-                          {gap.resolution ? <small>Resolution: {gap.resolution}</small> : null}
-                          <div className="gap-decision">
-                            <label>
-                              <span>Disposition</span>
-                              <select
-                                value={gapDecisions[gap.key]?.disposition ?? 'defer'}
-                                onChange={(event) => setGapDecisions((current) => ({
+                      <article key={gap.key}>
+                        <Badge variant="outline">{gap.severity}</Badge>
+                        <strong>
+                          {gap.stage}: {gap.type.replaceAll('_', ' ')}
+                        </strong>
+                        <p>
+                          {gap.asset ? `${gap.asset}: ` : ''}
+                          {gap.detail}
+                        </p>
+                        {gap.resolution ? <small>Resolution: {gap.resolution}</small> : null}
+                        <div className="gap-decision">
+                          <label>
+                            <span>Disposition</span>
+                            <select
+                              value={gapDecisions[gap.key]?.disposition ?? 'defer'}
+                              onChange={(event) =>
+                                setGapDecisions((current) => ({
                                   ...current,
                                   [gap.key]: {
                                     notes: current[gap.key]?.notes ?? '',
-                                    disposition: event.target.value as 'fix_now' | 'accept' | 'defer' | 'not_applicable',
+                                    disposition: event.target.value as
+                                      | 'fix_now'
+                                      | 'accept'
+                                      | 'defer'
+                                      | 'not_applicable',
                                   },
-                                }))}
-                              >
-                                <option value="fix_now">Fix now</option>
-                                <option value="accept">Accept limitation</option>
-                                <option value="defer">Defer</option>
-                                <option value="not_applicable">Not applicable</option>
-                              </select>
-                            </label>
-                            <label>
-                              <span>Reviewer note</span>
-                              <input
-                                value={gapDecisions[gap.key]?.notes ?? ''}
-                                onChange={(event) => setGapDecisions((current) => ({
+                                }))
+                              }
+                            >
+                              <option value="fix_now">Fix now</option>
+                              <option value="accept">Accept limitation</option>
+                              <option value="defer">Defer</option>
+                              <option value="not_applicable">Not applicable</option>
+                            </select>
+                          </label>
+                          <label>
+                            <span>Reviewer note</span>
+                            <input
+                              value={gapDecisions[gap.key]?.notes ?? ''}
+                              onChange={(event) =>
+                                setGapDecisions((current) => ({
                                   ...current,
                                   [gap.key]: {
                                     disposition: current[gap.key]?.disposition ?? 'defer',
                                     notes: event.target.value,
                                   },
-                                }))}
-                                placeholder="Decision rationale or repair instruction"
-                              />
-                            </label>
-                          </div>
-                        </article>
-                      ))}
+                                }))
+                              }
+                              placeholder="Decision rationale or repair instruction"
+                            />
+                          </label>
+                        </div>
+                      </article>
+                    ))}
                   </div>
                   <div className="workflow-job-actions">
                     <Button onClick={() => void prepareRemediation()} disabled={remediationBusy}>
@@ -1943,14 +2725,19 @@ function MappingWorkspace({ group, detail, onBack }: { group: GroupSummary; deta
               {remediationPackage ? (
                 <section className="workflow-job">
                   <h4>Targeted repair prompts</h4>
-                  <p>Run only the stages with approved fixes. Dashboard repair updates existing dashboard IDs and never invokes `/importBI`.</p>
+                  <p>
+                    Run only the stages with approved fixes. Dashboard repair updates existing dashboard IDs and never
+                    invokes `/importBI`.
+                  </p>
                   <JobPrompt task={{ taskKey: 'repair_dashboards', prompt: remediationPackage.dashboardPrompt }} />
                   <JobPrompt task={{ taskKey: 'repair_metric_view', prompt: remediationPackage.metricPrompt }} />
                   <JobPrompt task={{ taskKey: 'repair_genie_agent', prompt: remediationPackage.agentPrompt }} />
                 </section>
               ) : null}
               <div className="workflow-job-actions">
-                <Button variant="outline" onClick={() => void loadSemanticResults()}>Refresh results</Button>
+                <Button variant="outline" onClick={() => void loadSemanticResults()}>
+                  Refresh results
+                </Button>
                 <Button onClick={() => setGroupStage('promote')}>Continue to promotion</Button>
               </div>
             </>
@@ -1978,11 +2765,15 @@ function MappingWorkspace({ group, detail, onBack }: { group: GroupSummary; deta
               <CircleHelp className="size-4" />
               <AlertTitle>Promotion behavior</AlertTitle>
               <AlertDescription>
-                Keeping the current names accepts the created assets as final. Different names create an approved pending rename request; this step does not silently copy or rename governed assets.
+                Keeping the current names accepts the created assets as final. Different names create an approved
+                pending rename request; this step does not silently copy or rename governed assets.
               </AlertDescription>
             </Alert>
             <div className="workflow-job-actions">
-              <Button onClick={() => void savePromotion()} disabled={promotionBusy || !finalMetricViewFqn || !finalAgentName}>
+              <Button
+                onClick={() => void savePromotion()}
+                disabled={promotionBusy || !finalMetricViewFqn || !finalAgentName}
+              >
                 {promotionBusy ? 'Saving…' : 'Save promotion decision'}
               </Button>
             </div>
@@ -2001,16 +2792,32 @@ function MappingWorkspace({ group, detail, onBack }: { group: GroupSummary; deta
           <DialogContent className="mapping-preview-dialog mapping-package-dialog">
             <DialogHeader>
               <DialogTitle>Prepared Genie Code package</DialogTitle>
-              <DialogDescription>Copy the executable Job prompt. Rendered Volume prompts are read-only references.</DialogDescription>
+              <DialogDescription>
+                Copy the executable Job prompt. Rendered Volume prompts are read-only references.
+              </DialogDescription>
             </DialogHeader>
             <div className="import-package-content">
               <p className="package-setup-note">{importPackage?.jobSetup.instructions}</p>
               <section className="package-step">
                 <div className="package-step__heading">
-                  <div><span>1</span><h3>Dashboard migration</h3></div>
-                  {importPackage?.jobSetup.jobs[0]?.jobUrl ? <a className="job-run-link" href={importPackage.jobSetup.jobs[0].jobUrl ?? undefined} target="_blank" rel="noreferrer">Open Dashboard Import Job <ExternalLink aria-hidden="true" /></a> : null}
+                  <div>
+                    <span>1</span>
+                    <h3>Dashboard migration</h3>
+                  </div>
+                  {importPackage?.jobSetup.jobs[0]?.jobUrl ? (
+                    <a
+                      className="job-run-link"
+                      href={importPackage.jobSetup.jobs[0].jobUrl ?? undefined}
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      Open Dashboard Import Job <ExternalLink aria-hidden="true" />
+                    </a>
+                  ) : null}
                 </div>
-                {importPackage?.jobSetup.jobs[0]?.tasks.map((task) => <JobPrompt key={task.taskKey} task={task} />)}
+                {importPackage?.jobSetup.jobs[0]?.tasks.map((task) => (
+                  <JobPrompt key={task.taskKey} task={task} />
+                ))}
                 <ReferencePrompt
                   label="Rendered dashboard reference"
                   path={importPackage?.session1PromptPath}
@@ -2019,10 +2826,26 @@ function MappingWorkspace({ group, detail, onBack }: { group: GroupSummary; deta
               </section>
               <section className="package-step">
                 <div className="package-step__heading">
-                  <div><span>2</span><h3>Metric View</h3></div>
-                  {importPackage?.jobSetup.jobs[1]?.jobUrl ? <a className="job-run-link" href={importPackage.jobSetup.jobs[1].jobUrl ?? undefined} target="_blank" rel="noreferrer">Open Semantic Build Job <ExternalLink aria-hidden="true" /></a> : null}
+                  <div>
+                    <span>2</span>
+                    <h3>Metric View</h3>
+                  </div>
+                  {importPackage?.jobSetup.jobs[1]?.jobUrl ? (
+                    <a
+                      className="job-run-link"
+                      href={importPackage.jobSetup.jobs[1].jobUrl ?? undefined}
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      Open Semantic Build Job <ExternalLink aria-hidden="true" />
+                    </a>
+                  ) : null}
                 </div>
-                {importPackage?.jobSetup.jobs[1]?.tasks.filter((task) => task.taskKey === 'build_metric_view').map((task) => <JobPrompt key={task.taskKey} task={task} />)}
+                {importPackage?.jobSetup.jobs[1]?.tasks
+                  .filter((task) => task.taskKey === 'build_metric_view')
+                  .map((task) => (
+                    <JobPrompt key={task.taskKey} task={task} />
+                  ))}
                 <ReferencePrompt
                   label="Rendered Metric View reference"
                   path={importPackage?.metricViewPromptPath}
@@ -2031,10 +2854,26 @@ function MappingWorkspace({ group, detail, onBack }: { group: GroupSummary; deta
               </section>
               <section className="package-step">
                 <div className="package-step__heading">
-                  <div><span>3</span><h3>Genie Agent</h3></div>
-                  {importPackage?.jobSetup.jobs[1]?.jobUrl ? <a className="job-run-link" href={importPackage.jobSetup.jobs[1].jobUrl ?? undefined} target="_blank" rel="noreferrer">Open Semantic Build Job <ExternalLink aria-hidden="true" /></a> : null}
+                  <div>
+                    <span>3</span>
+                    <h3>Genie Agent</h3>
+                  </div>
+                  {importPackage?.jobSetup.jobs[1]?.jobUrl ? (
+                    <a
+                      className="job-run-link"
+                      href={importPackage.jobSetup.jobs[1].jobUrl ?? undefined}
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      Open Semantic Build Job <ExternalLink aria-hidden="true" />
+                    </a>
+                  ) : null}
                 </div>
-                {importPackage?.jobSetup.jobs[1]?.tasks.filter((task) => task.taskKey === 'build_genie_agent').map((task) => <JobPrompt key={task.taskKey} task={task} />)}
+                {importPackage?.jobSetup.jobs[1]?.tasks
+                  .filter((task) => task.taskKey === 'build_genie_agent')
+                  .map((task) => (
+                    <JobPrompt key={task.taskKey} task={task} />
+                  ))}
                 <ReferencePrompt
                   label="Rendered Genie Agent reference"
                   path={importPackage?.genieAgentPromptPath}
@@ -2044,12 +2883,17 @@ function MappingWorkspace({ group, detail, onBack }: { group: GroupSummary; deta
               <section className="package-contract">
                 <h3>Approved mapping contract</h3>
                 <details className="job-prompt">
-                  <summary><span>{importPackage?.mappingFileName}</span><Badge variant="outline">YAML</Badge></summary>
+                  <summary>
+                    <span>{importPackage?.mappingFileName}</span>
+                    <Badge variant="outline">YAML</Badge>
+                  </summary>
                   <div className="job-prompt__content">
                     <pre>{importPackage?.contractYaml}</pre>
                     <div className="mapping-draft-action">
                       <CopyButton value={importPackage?.contractYaml ?? ''} label="Copy YAML" />
-                      <Button size="sm" onClick={downloadContract}>Download YAML</Button>
+                      <Button size="sm" onClick={downloadContract}>
+                        Download YAML
+                      </Button>
                     </div>
                   </div>
                 </details>
@@ -2122,7 +2966,9 @@ function JobRunSummary({ run, runningLabel }: { run: SemanticWorkflowRun; runnin
     <div className="semantic-run-summary">
       <div>
         <strong>{run.lifeCycleState ?? 'PENDING'}</strong>
-        <span>{run.resultState || runningLabel} · Run {run.databricksRunId}</span>
+        <span>
+          {run.resultState || runningLabel} · Run {run.databricksRunId}
+        </span>
       </div>
       <Progress value={progress} />
       <p className="job-run-detail-note">Open the Job run to inspect task order, logs, retries, and failures.</p>
@@ -2138,7 +2984,9 @@ function MappingGraph({
   relationships: NonNullable<GroupDetail['mappingContract']['relationships']>;
 }) {
   const sourceTables = Array.from(new Set(fields.map((field) => field.source_table || field.datasource))).sort();
-  const targetTables = Array.from(new Set(fields.map((field) => field.target_table).filter(Boolean) as string[])).sort();
+  const targetTables = Array.from(
+    new Set(fields.map((field) => field.target_table).filter(Boolean) as string[])
+  ).sort();
   const height = Math.max(260, Math.max(sourceTables.length, targetTables.length) * 76 + 70);
   const sourceY = new Map(sourceTables.map((table, index) => [table, 60 + index * 76]));
   const targetY = new Map(targetTables.map((table, index) => [table, 60 + index * 76]));
@@ -2156,40 +3004,73 @@ function MappingGraph({
   return (
     <div className="mapping-graph" role="img" aria-label="Source-to-Databricks mapping graph">
       <svg viewBox={`0 0 1000 ${height}`} preserveAspectRatio="xMinYMin meet">
-        <text className="mapping-graph__column-title" x="40" y="28">Source</text>
-        <text className="mapping-graph__column-title" x="700" y="28">Databricks target</text>
+        <text className="mapping-graph__column-title" x="40" y="28">
+          Source
+        </text>
+        <text className="mapping-graph__column-title" x="700" y="28">
+          Databricks target
+        </text>
         {Array.from(mappingEdges.values()).map((edge) => {
           const startY = (sourceY.get(edge.source) ?? 0) + 23;
           const endY = (targetY.get(edge.target) ?? 0) + 23;
           return (
             <g key={`${edge.source}-${edge.target}`}>
-              <path className={edge.unresolved ? 'mapping-graph__edge mapping-graph__edge--unresolved' : 'mapping-graph__edge'} d={`M 280 ${startY} C 430 ${startY}, 560 ${endY}, 700 ${endY}`} />
-              <text className="mapping-graph__edge-label" x="490" y={(startY + endY) / 2 - 4}>{edge.count} fields</text>
+              <path
+                className={
+                  edge.unresolved ? 'mapping-graph__edge mapping-graph__edge--unresolved' : 'mapping-graph__edge'
+                }
+                d={`M 280 ${startY} C 430 ${startY}, 560 ${endY}, 700 ${endY}`}
+              />
+              <text className="mapping-graph__edge-label" x="490" y={(startY + endY) / 2 - 4}>
+                {edge.count} fields
+              </text>
             </g>
           );
         })}
         {relationships.flatMap((relationship, index) => {
-          const left = relationship.target.left_table_candidates.length === 1 ? relationship.target.left_table_candidates[0] : '';
-          const right = relationship.target.right_table_candidates.length === 1 ? relationship.target.right_table_candidates[0] : '';
+          const left =
+            relationship.target.left_table_candidates.length === 1 ? relationship.target.left_table_candidates[0] : '';
+          const right =
+            relationship.target.right_table_candidates.length === 1
+              ? relationship.target.right_table_candidates[0]
+              : '';
           if (!targetY.has(left) || !targetY.has(right)) return [];
           const leftY = (targetY.get(left) ?? 0) + 46;
           const rightY = targetY.get(right) ?? 0;
-          return [<path key={`relationship-${index}`} className={`mapping-graph__relationship mapping-graph__relationship--${relationship.status}`} d={`M 940 ${leftY} C 980 ${leftY}, 980 ${rightY}, 940 ${rightY}`}><title>{relationship.target.condition}</title></path>];
+          return [
+            <path
+              key={`relationship-${index}`}
+              className={`mapping-graph__relationship mapping-graph__relationship--${relationship.status}`}
+              d={`M 940 ${leftY} C 980 ${leftY}, 980 ${rightY}, 940 ${rightY}`}
+            >
+              <title>{relationship.target.condition}</title>
+            </path>,
+          ];
         })}
         {sourceTables.map((table) => (
           <g key={table} transform={`translate(40 ${sourceY.get(table)})`}>
             <rect className="mapping-graph__node mapping-graph__node--source" width="240" height="46" rx="6" />
-            <text x="12" y="28"><title>{table}</title>{shortName(table)}</text>
+            <text x="12" y="28">
+              <title>{table}</title>
+              {shortName(table)}
+            </text>
           </g>
         ))}
         {targetTables.map((table) => (
           <g key={table} transform={`translate(700 ${targetY.get(table)})`}>
             <rect className="mapping-graph__node mapping-graph__node--target" width="240" height="46" rx="6" />
-            <text x="12" y="28"><title>{table}</title>{shortName(table)}</text>
+            <text x="12" y="28">
+              <title>{table}</title>
+              {shortName(table)}
+            </text>
           </g>
         ))}
       </svg>
-      <div className="mapping-graph__legend"><span>Field mapping</span><span>Target relationship</span><span>Red requires review</span></div>
+      <div className="mapping-graph__legend">
+        <span>Field mapping</span>
+        <span>Target relationship</span>
+        <span>Red requires review</span>
+      </div>
     </div>
   );
 }
@@ -2209,8 +3090,12 @@ function RelationshipEditor({
   saved: boolean;
   onSaved: () => void;
 }) {
-  const [leftTable, setLeftTable] = useState(relationship.target.left_table_candidates.length === 1 ? relationship.target.left_table_candidates[0] : '');
-  const [rightTable, setRightTable] = useState(relationship.target.right_table_candidates.length === 1 ? relationship.target.right_table_candidates[0] : '');
+  const [leftTable, setLeftTable] = useState(
+    relationship.target.left_table_candidates.length === 1 ? relationship.target.left_table_candidates[0] : ''
+  );
+  const [rightTable, setRightTable] = useState(
+    relationship.target.right_table_candidates.length === 1 ? relationship.target.right_table_candidates[0] : ''
+  );
   const [joinType, setJoinType] = useState(relationship.target.join_type || 'left');
   const [condition, setCondition] = useState(relationship.target.condition || '');
   const [cardinality, setCardinality] = useState(relationship.target.cardinality || 'unknown');
@@ -2230,8 +3115,14 @@ function RelationshipEditor({
         joinType,
         condition,
         cardinality,
-        temporalPredicates: temporalPredicates.split('\n').map((value) => value.trim()).filter(Boolean),
-        recordFilters: recordFilters.split('\n').map((value) => value.trim()).filter(Boolean),
+        temporalPredicates: temporalPredicates
+          .split('\n')
+          .map((value) => value.trim())
+          .filter(Boolean),
+        recordFilters: recordFilters
+          .split('\n')
+          .map((value) => value.trim())
+          .filter(Boolean),
       }),
     });
     if (!response.ok) {
@@ -2244,19 +3135,81 @@ function RelationshipEditor({
   return (
     <article className={`relationship-card relationship-card--${saved ? 'proposed' : relationship.status}`}>
       <div className="relationship-card__header">
-        <div><h3>{relationship.source.left_table || 'Source table'} → {relationship.source.right_table}</h3><p>{relationship.source.condition || 'Source join condition unavailable'}</p></div>
+        <div>
+          <h3>
+            {relationship.source.left_table || 'Source table'} → {relationship.source.right_table}
+          </h3>
+          <p>{relationship.source.condition || 'Source join condition unavailable'}</p>
+        </div>
         <Badge variant="outline">{saved ? 'Updated' : relationship.status}</Badge>
       </div>
       <div className="relationship-editor-grid">
-        <label>Left Databricks table<select value={leftTable} onChange={(event) => setLeftTable(event.target.value)}><option value="">Select table</option>{targetTables.map((table) => <option key={table}>{table}</option>)}</select></label>
-        <label>Right Databricks table<select value={rightTable} onChange={(event) => setRightTable(event.target.value)}><option value="">Select table</option>{targetTables.map((table) => <option key={table}>{table}</option>)}</select></label>
-        <label>Join type<select value={joinType} onChange={(event) => setJoinType(event.target.value)}>{['inner', 'left', 'right', 'full', 'relationship'].map((value) => <option key={value}>{value}</option>)}</select></label>
-        <label>Grain / cardinality<select value={cardinality} onChange={(event) => setCardinality(event.target.value)}>{['one_to_one', 'one_to_many', 'many_to_one', 'many_to_many', 'unknown'].map((value) => <option key={value}>{value}</option>)}</select></label>
-        <label className="relationship-editor-grid__wide">Target join condition<input value={condition} onChange={(event) => setCondition(event.target.value)} /></label>
-        <label className="relationship-editor-grid__wide">Temporal predicates<textarea value={temporalPredicates} onChange={(event) => setTemporalPredicates(event.target.value)} placeholder="One predicate per line" /></label>
-        <label className="relationship-editor-grid__wide">Current-record filters<textarea value={recordFilters} onChange={(event) => setRecordFilters(event.target.value)} placeholder="One filter per line" /></label>
+        <label>
+          Left Databricks table
+          <select value={leftTable} onChange={(event) => setLeftTable(event.target.value)}>
+            <option value="">Select table</option>
+            {targetTables.map((table) => (
+              <option key={table}>{table}</option>
+            ))}
+          </select>
+        </label>
+        <label>
+          Right Databricks table
+          <select value={rightTable} onChange={(event) => setRightTable(event.target.value)}>
+            <option value="">Select table</option>
+            {targetTables.map((table) => (
+              <option key={table}>{table}</option>
+            ))}
+          </select>
+        </label>
+        <label>
+          Join type
+          <select value={joinType} onChange={(event) => setJoinType(event.target.value)}>
+            {['inner', 'left', 'right', 'full', 'relationship'].map((value) => (
+              <option key={value}>{value}</option>
+            ))}
+          </select>
+        </label>
+        <label>
+          Grain / cardinality
+          <select value={cardinality} onChange={(event) => setCardinality(event.target.value)}>
+            {['one_to_one', 'one_to_many', 'many_to_one', 'many_to_many', 'unknown'].map((value) => (
+              <option key={value}>{value}</option>
+            ))}
+          </select>
+        </label>
+        <label className="relationship-editor-grid__wide">
+          Target join condition
+          <input value={condition} onChange={(event) => setCondition(event.target.value)} />
+        </label>
+        <label className="relationship-editor-grid__wide">
+          Temporal predicates
+          <textarea
+            value={temporalPredicates}
+            onChange={(event) => setTemporalPredicates(event.target.value)}
+            placeholder="One predicate per line"
+          />
+        </label>
+        <label className="relationship-editor-grid__wide">
+          Current-record filters
+          <textarea
+            value={recordFilters}
+            onChange={(event) => setRecordFilters(event.target.value)}
+            placeholder="One filter per line"
+          />
+        </label>
       </div>
-      <div className="relationship-card__actions"><Button size="sm" onClick={() => void save()} disabled={!leftTable || !rightTable || !condition || cardinality === 'unknown' || saveState === 'saving'}>{saveState === 'saving' ? 'Applying…' : 'Apply relationship'}</Button>{cardinality === 'unknown' ? <span>Choose the target grain/cardinality to continue.</span> : null}{saveState === 'error' ? <span>Update failed</span> : null}</div>
+      <div className="relationship-card__actions">
+        <Button
+          size="sm"
+          onClick={() => void save()}
+          disabled={!leftTable || !rightTable || !condition || cardinality === 'unknown' || saveState === 'saving'}
+        >
+          {saveState === 'saving' ? 'Applying…' : 'Apply relationship'}
+        </Button>
+        {cardinality === 'unknown' ? <span>Choose the target grain/cardinality to continue.</span> : null}
+        {saveState === 'error' ? <span>Update failed</span> : null}
+      </div>
     </article>
   );
 }
@@ -2491,4 +3444,3 @@ function InfoTooltip({ label, content }: { label: string; content: string }) {
     </Tooltip>
   );
 }
-

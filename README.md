@@ -64,13 +64,16 @@ python3 scripts/deploy.py \
   --component jobs
 ```
 
-This creates or reconciles the editable **Dashboard Import** and **Semantic Build** Jobs. Existing Genie Code task bodies are preserved because the Jobs API redacts them; deterministic notebook tasks and dependencies are updated from the repository.
+This creates or reconciles the editable **Dashboard Import**, **Semantic Build**, and **Metric View Repair** Jobs. Existing Genie Code task bodies are preserved because the Jobs API redacts them; deterministic notebook tasks and dependencies are updated from the repository.
 
 On a new workspace, configure these placeholders once in the Jobs UI using the prompts shown by the App:
 
 - nested `import_dashboard` task in the Dashboard Import `For each`
 - `build_metric_view`
 - `build_genie_agent`
+- `repair_metric_view` in the Metric View Repair Job
+
+The repair workflow validates each revision deterministically and can submit another repair run automatically, stopping after five attempts or when the same failure signature repeats.
 
 ### 2. Deploy the bundle and App
 
@@ -82,6 +85,18 @@ python3 scripts/deploy.py \
 ```
 
 This deploys the Python wheel, inventory Job, notebooks, App source, and App resource bindings using the discovered external Job IDs. It does not modify Genie Code task definitions.
+
+The App also binds the separately deployed datasource semantic workflow. Override its workspace-specific resources when they differ from the development defaults:
+
+```bash
+python3 scripts/deploy.py \
+  --profile DEFAULT \
+  --target default \
+  --component app \
+  --datasource-semantic-proposal-job-id <propose-job-id> \
+  --datasource-semantic-migration-job-id <migration-job-id> \
+  --datasource-semantic-volume-full-name <catalog.schema.volume>
+```
 
 For a coordinated first deployment, run both phases:
 

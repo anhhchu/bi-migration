@@ -6,10 +6,11 @@ import yaml
 from databricks.sdk import WorkspaceClient
 
 
-for name in ("run_id", "group_run_path"):
+for name in ("run_id", "group_run_path", "fail_on_error"):
     dbutils.widgets.text(name, "")
 run_id = dbutils.widgets.get("run_id").strip()
 group_run_path = Path(dbutils.widgets.get("group_run_path").rstrip("/"))
+fail_on_error = dbutils.widgets.get("fail_on_error").strip().lower() not in {"false", "0", "no"}
 manifest = json.loads((group_run_path / "group-migration-manifest.json").read_text(encoding="utf-8"))
 metric_view_fqn = manifest["candidate_metric_view_fqn"]
 semantic_dir = group_run_path / "semantic"
@@ -56,6 +57,19 @@ report = {
     "errors": errors,
 }
 (semantic_dir / "metric-view-validation.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
+print("\n=== Metric View Validation ===")
+print(f"Status: {report['status']}")
+print(f"Metric View: {metric_view_fqn}")
+print(f"Dimensions: {len(dimensions)}")
+print(f"Measures: {len(measures)}")
+print(f"Measure smoke tests passed: {sum(test['status'] == 'PASS' for test in smoke_tests)}/{len(smoke_tests)}")
 if errors:
+    print("Blocking errors:")
+    for error in errors:
+        print(f"- {error}")
+else:
+    print("Blocking errors: none")
+print(f"Artifact: {semantic_dir / 'metric-view-validation.json'}")
+if errors and fail_on_error:
     raise RuntimeError("Metric View validation failed: " + "; ".join(errors))
 dbutils.notebook.exit(json.dumps(report))

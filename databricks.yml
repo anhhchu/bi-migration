@@ -8,12 +8,20 @@ variables:
     description: Workspace-managed Dashboard Import Job ID
   semantic_build_job_id:
     description: Workspace-managed Semantic Build Job ID
+  metric_view_repair_job_id:
+    description: Workspace-managed Metric View Repair Job ID
+  datasource_semantic_proposal_job_id:
+    description: Workspace-managed datasource semantic grouping Job ID
+  datasource_semantic_migration_job_id:
+    description: Workspace-managed datasource semantic migration Job ID
+  datasource_semantic_volume_full_name:
+    description: Unity Catalog Volume containing datasource semantic workflow runs
 
 resources:
   apps:
     app:
-      name: 'bi-migration-review'
-      description: 'Review BI migration groups, mappings, and readiness evidence'
+      name: "bi-migration-review"
+      description: "Review BI migration groups, mappings, and readiness evidence"
       source_code_path: ./app/bi-migration-review
 
       # Start the app automatically on deploy.
@@ -37,6 +45,23 @@ resources:
           job:
             id: ${var.dashboard_import_job_id}
             permission: CAN_MANAGE_RUN
+        - name: metric-view-repair-job
+          job:
+            id: ${var.metric_view_repair_job_id}
+            permission: CAN_MANAGE_RUN
+        - name: ds-semantic-proposal-job
+          job:
+            id: ${var.datasource_semantic_proposal_job_id}
+            permission: CAN_MANAGE_RUN
+        - name: ds-semantic-migration-job
+          job:
+            id: ${var.datasource_semantic_migration_job_id}
+            permission: CAN_MANAGE_RUN
+        - name: semantic-workflows
+          uc_securable:
+            securable_full_name: ${var.datasource_semantic_volume_full_name}
+            securable_type: VOLUME
+            permission: READ_VOLUME
       user_api_scopes:
         - files.files
         - catalog.catalogs:read
@@ -45,7 +70,7 @@ resources:
 
   jobs:
     inventory:
-      name: '[${bundle.target}] BI migration inventory'
+      name: "[${bundle.target}] BI migration inventory"
       performance_target: PERFORMANCE_OPTIMIZED
       tags:
         aidevkit_project: ai-dev-kit
@@ -54,17 +79,17 @@ resources:
           notebook_task:
             notebook_path: ./notebooks/inventory.py
             base_parameters:
-              input_path: ''
-              mapping_docs_path: ''
-              target_metadata_path: ''
-              output_path: ''
-              run_id: ''
-              source_base_uri: ''
+              input_path: ""
+              mapping_docs_path: ""
+              target_metadata_path: ""
+              output_path: ""
+              run_id: ""
+              source_base_uri: ""
           environment_key: default
       environments:
         - environment_key: default
           spec:
-            environment_version: '4'
+            environment_version: "4"
             dependencies:
               - ./dist/*.whl
 
@@ -79,7 +104,11 @@ targets:
     default: true
     variables:
       volume_full_name: main.superstore.tableau
-      dashboard_import_job_id: '0'
-      semantic_build_job_id: '0'
+      dashboard_import_job_id: "0"
+      semantic_build_job_id: "0"
+      metric_view_repair_job_id: "0"
+      datasource_semantic_proposal_job_id: "0"
+      datasource_semantic_migration_job_id: "0"
+      datasource_semantic_volume_full_name: main.bi_migration.semantic_workflows
     workspace:
       host: https://<workspace-host>

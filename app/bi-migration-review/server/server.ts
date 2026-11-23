@@ -43,17 +43,44 @@ type SourceAsset = {
   datasources: Array<unknown>;
 };
 
+type MigrationMode = 'semantic_model' | 'dashboard';
+
+type SemanticRunGroup = {
+  group_id: string;
+  display_name: string;
+  group_path: string;
+  report_path?: string;
+  candidate_metric_view_fqn?: string;
+  status: string;
+};
+
 const projectRoot = path.resolve(process.cwd(), '../..');
 let activeMigrationName = process.env.BI_MIGRATION_NAME ?? 'superstore-migration';
+let activeMigrationMode: MigrationMode = 'dashboard';
 const defaultTargetCatalog = process.env.BI_MIGRATION_TARGET_CATALOG ?? 'main';
 const defaultTargetSchema = process.env.BI_MIGRATION_TARGET_SCHEMA ?? 'superstore';
 const volumeRoot = process.env.DATABRICKS_VOLUME_FILES?.replace(/\/$/, '') ?? '';
 let activeVolumeRoot = volumeRoot;
 const namespaceSchema = z.string().min(1).max(255);
-const migrationNameSchema = z.string().trim().min(2).max(64).transform((value) =>
-  value.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')
-).refine(Boolean, 'Enter a migration name using letters or numbers.');
-const uploadExtensions = new Set(['.twb', '.twbx', '.csv', '.json', '.yaml', '.yml', '.md']);
+const migrationNameSchema = z
+  .string()
+  .trim()
+  .min(2)
+  .max(64)
+  .transform((value) =>
+    value
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-|-$/g, '')
+  )
+  .refine(Boolean, 'Enter a migration name using letters or numbers.');
+const uploadExtensions = new Set(['.twb', '.twbx', '.tds', '.tdsx', '.csv', '.json', '.yaml', '.yml', '.md']);
+const migrationModeSchema = z.enum(['semantic_model', 'dashboard']);
+const absoluteVolumePathSchema = z
+  .string()
+  .trim()
+  .startsWith('/Volumes/')
+  .refine((value) => !value.split('/').includes('..'), 'Volume paths cannot contain parent traversal.');
 const mappingUpdateSchema = z.object({
   corpusId: z.enum(['downloaded', 'synthetic', 'uploaded']),
   datasource: z.string().min(1),
@@ -79,17 +106,21 @@ const promotionDecisionSchema = z.object({
   notes: z.string().trim().max(2000).optional().default(''),
 });
 const remediationPlanSchema = z.object({
-  decisions: z.array(z.object({
-    gapKey: z.string().min(1),
-    stage: z.enum(['Dashboard import', 'Metric View', 'Genie Agent']),
-    severity: z.enum(['high', 'medium', 'low', 'info']),
-    type: z.string().min(1),
-    detail: z.string().min(1),
-    resolution: z.string().optional(),
-    asset: z.string().optional(),
-    disposition: z.enum(['fix_now', 'accept', 'defer', 'not_applicable']),
-    notes: z.string().max(2000).optional().default(''),
-  })).min(1),
+  decisions: z
+    .array(
+      z.object({
+        gapKey: z.string().min(1),
+        stage: z.enum(['Dashboard import', 'Metric View', 'Genie Agent']),
+        severity: z.enum(['high', 'medium', 'low', 'info']),
+        type: z.string().min(1),
+        detail: z.string().min(1),
+        resolution: z.string().optional(),
+        asset: z.string().optional(),
+        disposition: z.enum(['fix_now', 'accept', 'defer', 'not_applicable']),
+        notes: z.string().max(2000).optional().default(''),
+      })
+    )
+    .min(1),
 });
 
 const SESSION_1_PROMPT_VERSION = '1.1.0';
@@ -152,7 +183,7 @@ const JOB_TASK_PROMPTS = {
     'Read `{{group_run_path}}/group-migration-manifest.json` to resolve the validated Metric View FQN, dashboard configuration directory, Genie Agent name, and semantic artifact directory. Read the Metric View validation artifact first and stop unless its status is PASS.',
     '',
     'Requirements:',
-    '1. Use the validated Metric View as the Agent\'s only governed data source.',
+    "1. Use the validated Metric View as the Agent's only governed data source.",
     '2. Inspect dashboard titles, descriptions, filters, parameters, visualizations, and KPI usage to derive business context.',
     '3. Configure concise business instructions, relevant synonyms, and 5–8 visible sample questions.',
     '4. Add at least 12 benchmark questions to the Agent evaluation configuration.',
@@ -164,14 +195,25 @@ const JOB_TASK_PROMPTS = {
     '',
     'Fail if the Agent cannot be created. Otherwise report SUCCESS or PARTIAL with explicit benchmark failures.',
   ].join('\n'),
+  repairMetricView: [
+    '# Genie Code — Repair candidate Metric View',
+    '',
+    'Read and execute the generated repair prompt at:',
+    '`{{tasks.prepare_metric_view_repair.values.repair_prompt_path}}`',
+    '',
+    'Update only the existing candidate Metric View. Do not create replacement assets or approve your own repair.',
+    'Deterministic downstream tasks validate the result and control bounded retries.',
+  ].join('\n'),
 };
 
 function jobSetup() {
   const workspaceUrl = (process.env.DATABRICKS_WORKSPACE_URL || process.env.DATABRICKS_HOST)?.replace(/\/$/, '');
   const dashboardJobId = process.env.DATABRICKS_JOB_DASHBOARD_IMPORT;
   const semanticJobId = process.env.DATABRICKS_JOB_SEMANTIC;
+  const metricViewRepairJobId = process.env.DATABRICKS_JOB_METRIC_VIEW_REPAIR;
   return {
-    instructions: 'In Dashboard Import, open the import_dashboards For each task and change its nested import_dashboard placeholder to Genie Code. Paste the prompt and save. Configure the two Semantic Build placeholders the same way.',
+    instructions:
+      'Configure each listed placeholder as a Genie Code task once. Repository deployment preserves those editable tasks while updating deterministic notebooks.',
     jobs: [
       {
         label: 'Dashboard Import',
@@ -188,12 +230,52 @@ function jobSetup() {
           { taskKey: 'build_genie_agent', prompt: JOB_TASK_PROMPTS.buildGenieAgent },
         ],
       },
+      {
+        label: 'Metric View Repair',
+        jobId: metricViewRepairJobId,
+        jobUrl: workspaceUrl && metricViewRepairJobId ? `${workspaceUrl}/jobs/${metricViewRepairJobId}` : null,
+        tasks: [{ taskKey: 'repair_metric_view', prompt: JOB_TASK_PROMPTS.repairMetricView }],
+      },
     ],
   };
 }
 
 function sha256(value: string) {
   return createHash('sha256').update(value).digest('hex');
+}
+
+function normalizeVolumePath(value: string) {
+  return value.trim().replace(/\/+$/, '');
+}
+
+function volumeRootFromPath(value: string) {
+  const match = normalizeVolumePath(value).match(/^\/Volumes\/([^/]+)\/([^/]+)\/([^/]+)/);
+  return match ? `/Volumes/${match[1]}/${match[2]}/${match[3]}` : '';
+}
+
+function semanticInputRoot(datasourcePath: string, mappingPath: string) {
+  const normalizedDatasource = normalizeVolumePath(datasourcePath);
+  const normalizedMapping = normalizeVolumePath(mappingPath);
+  const mappingDirectory = /\/table-mapping\.(csv|ya?ml)$/i.test(normalizedMapping)
+    ? normalizedMapping.slice(0, normalizedMapping.lastIndexOf('/'))
+    : normalizedMapping;
+  if (!normalizedDatasource.endsWith('/datasources')) {
+    throw new Error('Datasource path must point to a datasources folder.');
+  }
+  if (!mappingDirectory.endsWith('/mappings')) {
+    throw new Error('Mapping path must point to a mappings folder or table-mapping.csv/yaml within it.');
+  }
+  const datasourceRoot = normalizedDatasource.slice(0, -'/datasources'.length);
+  const mappingRoot = mappingDirectory.slice(0, -'/mappings'.length);
+  if (datasourceRoot !== mappingRoot) {
+    throw new Error('Datasource and mapping paths must share the same parent input folder.');
+  }
+  return datasourceRoot;
+}
+
+function workspaceRunUrl(jobId: string | undefined, runId: number | null) {
+  const workspaceUrl = process.env.DATABRICKS_WORKSPACE_URL?.replace(/\/$/, '');
+  return workspaceUrl && jobId && runId ? `${workspaceUrl}/jobs/${jobId}/runs/${runId}` : null;
 }
 
 function renderMetricViewPrompt(input: {
@@ -333,9 +415,7 @@ function groupDirectoryName(group: SemanticGroup) {
   }
   const requiredCount = Math.max(2, Math.ceil(group.assets.length * 0.75));
   const firstAssetTokens = [...new Set(tokensFor(group.assets[0] ?? ''))];
-  const sharedTokens = firstAssetTokens
-    .filter((token) => (tokenCounts.get(token) ?? 0) >= requiredCount)
-    .slice(0, 3)
+  const sharedTokens = firstAssetTokens.filter((token) => (tokenCounts.get(token) ?? 0) >= requiredCount).slice(0, 3);
   const fallbackTokens = firstAssetTokens.slice(0, 3);
   return (sharedTokens.length ? sharedTokens : fallbackTokens).join('-').slice(0, 40) || group.group_id;
 }
@@ -343,6 +423,7 @@ function groupDirectoryName(group: SemanticGroup) {
 let processingStatus: 'idle' | 'running' | 'complete' | 'failed' = 'idle';
 let processingMessage = '';
 let inventoryRunId: number | null = null;
+let processingJobKey: 'inventory' | 'semantic_proposal' = 'inventory';
 
 await createApp({
   plugins: [
@@ -389,6 +470,21 @@ await createApp({
             }),
           }),
         },
+        semantic_proposal: {
+          params: z.object({
+            job_parameters: z.object({
+              input_volume_path: z.string().startsWith('/Volumes/'),
+            }),
+          }),
+        },
+        semantic_migration: {
+          params: z.object({
+            job_parameters: z.object({
+              proposal_run_id: z.string().min(1),
+              approved_by: z.string().min(1),
+            }),
+          }),
+        },
       },
     }),
   ],
@@ -406,9 +502,16 @@ await createApp({
       };
       const migrationRoot = (root: string) => `${root}/bi-migrations/${activeMigrationName}`;
       const uploadManifestPath = (root: string) => `${migrationRoot(root)}/control/uploads.json`;
-      const slugify = (value: string) => value.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 64);
+      const slugify = (value: string) =>
+        value
+          .toLowerCase()
+          .replace(/[^a-z0-9]+/g, '-')
+          .replace(/^-|-$/g, '')
+          .slice(0, 64);
       const groupWorkspacePath = async (request: Request, root: string, groupId: string) => {
-        const groups = JSON.parse(await volumeHandle(request).read(`${migrationRoot(root)}/inventory/groups.json`)) as SemanticGroup[];
+        const groups = JSON.parse(
+          await volumeHandle(request).read(`${migrationRoot(root)}/inventory/groups.json`)
+        ) as SemanticGroup[];
         const group = groups.find((item) => item.group_id === groupId);
         if (!group) return `${migrationRoot(root)}/groups/${groupId}`;
         const baseName = groupDirectoryName(group);
@@ -435,23 +538,28 @@ await createApp({
           .catch(() => []);
       };
       app.post('/api/migration-context', (request, response) => {
-        const parsed = migrationNameSchema.safeParse(request.body?.name);
+        const parsed = z.object({ name: migrationNameSchema, mode: migrationModeSchema }).safeParse(request.body);
         if (!parsed.success) {
-          response.status(400).json({ error: parsed.error.issues[0]?.message ?? 'Enter a valid migration name.' });
+          response.status(400).json({ error: parsed.error.issues[0]?.message ?? 'Enter a valid migration context.' });
           return;
         }
-        activeMigrationName = parsed.data;
+        activeMigrationName = parsed.data.name;
+        activeMigrationMode = parsed.data.mode;
         processingStatus = 'idle';
         processingMessage = 'Ready to upload migration assets.';
         inventoryRunId = null;
-        response.json({ name: activeMigrationName, root: activeVolumeRoot ? migrationRoot(activeVolumeRoot) : null });
+        response.json({
+          name: activeMigrationName,
+          mode: activeMigrationMode,
+          root: activeVolumeRoot ? migrationRoot(activeVolumeRoot) : null,
+        });
       });
       app.get('/api/review', async (request, response) => {
         try {
           if (!activeVolumeRoot) throw new Error('Choose the run Volume on Upload assets first.');
           const outputRoot = `${migrationRoot(activeVolumeRoot)}/inventory`;
           const volume = volumeHandle(request);
-          const readOutputJson = async <T,>(relativePath: string) =>
+          const readOutputJson = async <T>(relativePath: string) =>
             JSON.parse(await volume.read(`${outputRoot}/${relativePath}`)) as T;
           const [groupSummaries, semanticGroups, manifest, inventoryErrors] = await Promise.all([
             readOutputJson<GroupSummary[]>('group_readiness.json'),
@@ -520,20 +628,23 @@ await createApp({
       });
 
       app.get('/api/uploads', async (request, response) => {
-        const requestedVolume = typeof request.query.volume === 'string' ? volumePathFromName(request.query.volume) : '';
+        const requestedVolume =
+          typeof request.query.volume === 'string' ? volumePathFromName(request.query.volume) : '';
         const selectedVolume = requestedVolume || activeVolumeRoot;
         if (selectedVolume) activeVolumeRoot = selectedVolume;
         const files = await readUploadManifest(request, selectedVolume);
         const namespaces = new Map<string, { catalog: string; schema: string }>();
         for (const file of files.filter((item) => item.kind === 'Mapping evidence')) {
-          const contents = await volumeHandle(request).read(file.volumePath).catch(() => '');
+          const contents = await volumeHandle(request)
+            .read(file.volumePath)
+            .catch(() => '');
           for (const match of contents.matchAll(/\b([A-Za-z_][\w-]*)\.([A-Za-z_][\w-]*)\.([A-Za-z_][\w-]*)\b/g)) {
             const [, catalog, schema] = match;
             namespaces.set(`${catalog}.${schema}`, { catalog, schema });
           }
         }
         if (inventoryRunId && processingStatus === 'running') {
-          const runResult = await appkit.jobs('inventory').getRun(inventoryRunId);
+          const runResult = await appkit.jobs(processingJobKey).getRun(inventoryRunId);
           if (runResult.ok) {
             const lifeCycleState = String(runResult.data.state?.life_cycle_state ?? '');
             const resultState = String(runResult.data.state?.result_state ?? '');
@@ -541,13 +652,14 @@ await createApp({
               processingStatus = resultState === 'SUCCESS' ? 'complete' : 'failed';
               processingMessage =
                 resultState === 'SUCCESS'
-                  ? `Inventory job run ${inventoryRunId} completed.`
-                  : `Inventory job run ${inventoryRunId} finished with ${resultState || 'an error'}.`;
+                  ? `${activeMigrationMode === 'semantic_model' ? 'Semantic grouping' : 'Inventory'} job run ${inventoryRunId} completed.`
+                  : `Job run ${inventoryRunId} finished with ${resultState || 'an error'}.`;
             }
           }
         }
         response.json({
           migrationName: activeMigrationName,
+          migrationMode: activeMigrationMode,
           migrationRoot: selectedVolume ? migrationRoot(selectedVolume) : null,
           storage: selectedVolume ? `Unity Catalog Volume: ${selectedVolume}` : 'Choose a Unity Catalog Volume',
           uploadDestination: selectedVolume
@@ -559,10 +671,12 @@ await createApp({
             status: processingStatus,
             message: processingMessage,
             runId: inventoryRunId,
-            runUrl:
-              inventoryRunId && process.env.DATABRICKS_WORKSPACE_URL && process.env.DATABRICKS_JOB_ID
-                ? `${process.env.DATABRICKS_WORKSPACE_URL.replace(/\/$/, '')}/jobs/${process.env.DATABRICKS_JOB_ID}/runs/${inventoryRunId}`
-                : null,
+            runUrl: workspaceRunUrl(
+              processingJobKey === 'semantic_proposal'
+                ? process.env.DATABRICKS_JOB_SEMANTIC_PROPOSAL
+                : process.env.DATABRICKS_JOB_ID,
+              inventoryRunId
+            ),
           },
         });
       });
@@ -579,9 +693,7 @@ await createApp({
 
       app.get('/api/session', async (request, response) => {
         try {
-          const user = await appkit.asUser(request).run(async () =>
-            getExecutionContext().client.currentUser.me()
-          );
+          const user = await appkit.asUser(request).run(async () => getExecutionContext().client.currentUser.me());
           response.json({
             displayName: user.displayName || user.userName || 'Databricks user',
             userName: user.userName || '',
@@ -591,13 +703,210 @@ await createApp({
         }
       });
 
+      app.post('/api/volume-inputs/inspect', async (request, response) => {
+        const parsed = z
+          .object({
+            datasourcePath: absoluteVolumePathSchema,
+            mappingPath: absoluteVolumePathSchema,
+          })
+          .safeParse(request.body);
+        if (!parsed.success) {
+          response
+            .status(400)
+            .json({ error: parsed.error.issues[0]?.message ?? 'Enter valid Unity Catalog Volume paths.' });
+          return;
+        }
+        try {
+          const inputRoot = semanticInputRoot(parsed.data.datasourcePath, parsed.data.mappingPath);
+          const volume = volumeHandle(request);
+          const normalizedMappingPath = normalizeVolumePath(parsed.data.mappingPath);
+          const mappingDirectory = /\/table-mapping\.(csv|ya?ml)$/i.test(normalizedMappingPath)
+            ? normalizedMappingPath.slice(0, normalizedMappingPath.lastIndexOf('/'))
+            : normalizedMappingPath;
+          const [datasourceExists, mappingExists, mappingEntries] = await Promise.all([
+            volume.exists(normalizeVolumePath(parsed.data.datasourcePath)),
+            volume.exists(normalizedMappingPath),
+            volume.list(mappingDirectory).catch(() => []),
+          ]);
+          if (!datasourceExists || !mappingExists) {
+            response.status(404).json({
+              error: `${!datasourceExists ? 'Datasource' : 'Mapping'} path was not found or is not accessible.`,
+            });
+            return;
+          }
+          const hasSupportedMapping =
+            /\/table-mapping\.(csv|ya?ml)$/i.test(normalizedMappingPath) ||
+            mappingEntries.some((entry) => /(^|\/)table-mapping\.(csv|ya?ml)$/i.test(entry.path ?? ''));
+          if (!hasSupportedMapping) {
+            response.status(400).json({
+              error: 'The mappings folder must contain table-mapping.csv, table-mapping.yaml, or table-mapping.yml.',
+            });
+            return;
+          }
+          response.json({
+            status: 'ready',
+            inputRoot,
+            datasourcePath: normalizeVolumePath(parsed.data.datasourcePath),
+            mappingPath: normalizeVolumePath(parsed.data.mappingPath),
+          });
+        } catch (error) {
+          response
+            .status(400)
+            .json({ error: error instanceof Error ? error.message : 'Could not validate input paths.' });
+        }
+      });
+
+      app.get('/api/semantic-runs', async (request, response) => {
+        const requestedRoot = typeof request.query.root === 'string' ? request.query.root : '';
+        const defaultRoot = process.env.DATASOURCE_SEMANTIC_OUTPUT_PATH ?? '';
+        const parsedRoot = absoluteVolumePathSchema.safeParse(requestedRoot || defaultRoot);
+        if (!parsedRoot.success) {
+          response.status(400).json({ error: 'Enter the semantic workflow output folder as a /Volumes/... path.' });
+          return;
+        }
+        const root = normalizeVolumePath(parsedRoot.data);
+        try {
+          const volume = volumeHandle(request);
+          const entries = await volume.list(`${root}/runs`);
+          const runs = await Promise.all(
+            entries.map(async (entry) => {
+              const entryPath = normalizeVolumePath(entry.path ?? '');
+              const runId = entryPath.split('/').pop() ?? '';
+              if (!runId) return null;
+              const readJson = async <T>(artifactPath: string): Promise<T | null> =>
+                volume
+                  .read(artifactPath)
+                  .then((content) => JSON.parse(content) as T)
+                  .catch(() => null);
+              const [manifest, groupsIndex, review] = await Promise.all([
+                readJson<{ status?: string; created_at?: string; input?: { input_volume_path?: string } }>(
+                  `${entryPath}/manifest.json`
+                ),
+                readJson<{ groups?: SemanticRunGroup[]; summary?: Record<string, number> }>(
+                  `${entryPath}/_internal/semantic-groups-index.json`
+                ),
+                readJson<{ status?: string; headline?: string; totals?: Record<string, number> }>(
+                  `${entryPath}/reports/index.json`
+                ),
+              ]);
+              if (!manifest && !groupsIndex && !review) return null;
+              const groups = await Promise.all(
+                (groupsIndex?.groups ?? []).map(async (group) => {
+                  const migrationReview = await readJson<{ readiness?: string; status?: string }>(
+                    `${entryPath}/reports/groups/${group.group_id}/migration-review.json`
+                  );
+                  return {
+                    ...group,
+                    readiness: migrationReview?.readiness ?? null,
+                    migrationStatus: migrationReview?.status ?? null,
+                  };
+                })
+              );
+              return {
+                runId,
+                runPath: entryPath,
+                createdAt: manifest?.created_at ?? null,
+                inputVolumePath: manifest?.input?.input_volume_path ?? null,
+                status: review?.status ?? manifest?.status ?? 'IN_PROGRESS',
+                headline:
+                  review?.headline ?? `${groups.length} proposed semantic group${groups.length === 1 ? '' : 's'}.`,
+                totals: review?.totals ?? groupsIndex?.summary ?? {},
+                groups,
+                reportPath: `${entryPath}/reports/index.json`,
+              };
+            })
+          );
+          response.json({
+            root,
+            runs: runs
+              .filter((run): run is NonNullable<typeof run> => run !== null)
+              .sort((left, right) => right.runId.localeCompare(left.runId, undefined, { numeric: true })),
+          });
+        } catch (error) {
+          response.status(404).json({
+            error: 'Semantic workflow runs could not be loaded from this Volume folder.',
+            detail: error instanceof Error ? error.message : String(error),
+          });
+        }
+      });
+
+      app.get('/api/semantic-runs/:runId/groups/:groupId', async (request, response) => {
+        const parsed = z
+          .object({
+            root: absoluteVolumePathSchema,
+            runId: z.string().regex(/^\d+$/),
+            groupId: z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/),
+          })
+          .safeParse({ root: request.query.root, ...request.params });
+        if (!parsed.success) {
+          response.status(400).json({ error: 'A valid run folder and semantic group are required.' });
+          return;
+        }
+        const runPath = `${normalizeVolumePath(parsed.data.root)}/runs/${parsed.data.runId}`;
+        const groupReportPath = `${runPath}/reports/groups/${parsed.data.groupId}`;
+        try {
+          const volume = volumeHandle(request);
+          const readJson = async <T>(artifactPath: string): Promise<T | null> =>
+            volume
+              .read(artifactPath)
+              .then((content) => JSON.parse(content) as T)
+              .catch(() => null);
+          const [groupsIndex, migrationReview, repairReview, sourceSummary] = await Promise.all([
+            readJson<{ groups?: SemanticRunGroup[] }>(`${runPath}/_internal/semantic-groups-index.json`),
+            readJson<Record<string, unknown>>(`${groupReportPath}/migration-review.json`),
+            readJson<Record<string, unknown>>(`${groupReportPath}/repair-review.json`),
+            readJson<Record<string, unknown>>(`${runPath}/groups/${parsed.data.groupId}/_internal/source-summary.json`),
+          ]);
+          const group = groupsIndex?.groups?.find((item) => item.group_id === parsed.data.groupId);
+          if (!group) {
+            response.status(404).json({ error: 'Semantic group was not found in this run.' });
+            return;
+          }
+          response.json({
+            group,
+            sourceSummary,
+            migrationReview,
+            repairReview,
+            artifacts: {
+              migrationReview: `${groupReportPath}/migration-review.json`,
+              migrationReviewHtml: `${groupReportPath}/migration-review.html`,
+              repairReview: `${groupReportPath}/repair-review.json`,
+              repairReviewHtml: `${groupReportPath}/repair-review.html`,
+            },
+          });
+        } catch (error) {
+          response.status(404).json({
+            error: 'Migration review artifacts are not available for this semantic group.',
+            detail: error instanceof Error ? error.message : String(error),
+          });
+        }
+      });
+
+      app.post('/api/semantic-runs/:runId/migrate', async (request, response) => {
+        const parsed = z.object({ runId: z.string().regex(/^\d+$/) }).safeParse(request.params);
+        if (!parsed.success) {
+          response.status(400).json({ error: 'A valid proposal run is required.' });
+          return;
+        }
+        const approvedBy =
+          request.header('x-forwarded-email') || request.header('x-forwarded-user') || 'Databricks user';
+        const jobResult = await appkit.jobs('semantic_migration').runNow({
+          job_parameters: { proposal_run_id: parsed.data.runId, approved_by: approvedBy },
+        });
+        if (!jobResult.ok || !jobResult.data.run_id) {
+          response.status(502).json({ error: 'Semantic migration Job submission failed.' });
+          return;
+        }
+        response.status(202).json({
+          runId: jobResult.data.run_id,
+          runUrl: workspaceRunUrl(process.env.DATABRICKS_JOB_SEMANTIC_MIGRATION, jobResult.data.run_id),
+        });
+      });
+
       app.get('/api/uploads/:fileName/content', async (request, response) => {
         const fileName = request.params.fileName;
         const extension = path.extname(fileName).toLowerCase();
-        if (
-          path.basename(fileName) !== fileName ||
-          !['.csv', '.json', '.yaml', '.yml', '.md'].includes(extension)
-        ) {
+        if (path.basename(fileName) !== fileName || !['.csv', '.json', '.yaml', '.yml', '.md'].includes(extension)) {
           response.status(400).json({ error: 'Only uploaded mapping evidence can be previewed.' });
           return;
         }
@@ -773,7 +1082,9 @@ await createApp({
           if (!activeVolumeRoot) throw new Error('Only Volume-backed migration runs can be updated.');
           const mappingPath = `${migrationRoot(activeVolumeRoot)}/inventory/groups/${groupId}/mappings/domains/uploaded-${groupId}.yaml`;
           const volume = volumeHandle(request);
-          const contract = parseYaml(await volume.read(mappingPath)) as { relationships?: Array<Record<string, unknown>> };
+          const contract = parseYaml(await volume.read(mappingPath)) as {
+            relationships?: Array<Record<string, unknown>>;
+          };
           const relationship = contract.relationships?.[parsed.data.relationshipIndex];
           if (!relationship) throw new Error('The relationship was not found in this contract.');
           relationship.target = {
@@ -952,15 +1263,27 @@ await createApp({
             volume.upload(session1PromptPath, context, { overwrite: true }),
             volume.upload(metricViewPromptPath, metricViewPrompt, { overwrite: true }),
             volume.upload(genieAgentPromptPath, genieAgentPrompt, { overwrite: true }),
-            volume.upload(`${groupRunPath}/group-migration-manifest.json`, JSON.stringify(groupMigrationManifest, null, 2), {
-              overwrite: true,
-            }),
-            volume.upload(`${groupRunPath}/group.json`, JSON.stringify({
-              group_id: groupId,
-              name: groupRunPath.split('/').pop(),
-              migration: activeMigrationName,
-              manifest_path: `${groupRunPath}/group-migration-manifest.json`,
-            }, null, 2), { overwrite: true }),
+            volume.upload(
+              `${groupRunPath}/group-migration-manifest.json`,
+              JSON.stringify(groupMigrationManifest, null, 2),
+              {
+                overwrite: true,
+              }
+            ),
+            volume.upload(
+              `${groupRunPath}/group.json`,
+              JSON.stringify(
+                {
+                  group_id: groupId,
+                  name: groupRunPath.split('/').pop(),
+                  migration: activeMigrationName,
+                  manifest_path: `${groupRunPath}/group-migration-manifest.json`,
+                },
+                null,
+                2
+              ),
+              { overwrite: true }
+            ),
           ]);
 
           const readinessPath = `${outputRoot}/groups/${groupId}/readiness_report.json`;
@@ -1042,7 +1365,9 @@ await createApp({
           const contract = parseYaml(contractYaml) as { status?: string };
           if (contract.status !== 'approved') throw new Error('Approve the mappings before preparing the import.');
           if (!context.includes('/Volumes/')) {
-            throw new Error('This package uses local paths. Prepare it again after uploading every workbook to a Volume.');
+            throw new Error(
+              'This package uses local paths. Prepare it again after uploading every workbook to a Volume.'
+            );
           }
           const selectedVolume = activeVolumeRoot;
           if (!selectedVolume) throw new Error('The package has no Unity Catalog Volume destination.');
@@ -1092,9 +1417,15 @@ await createApp({
           const requestedBy = user.userName || user.displayName || 'signed-in-user';
           const workflowRunId = `${activeMigrationName}-${groupId}-import-${Date.now()}`;
           const result = await appkit.jobs('dashboard_import').runNow({
-            job_parameters: { run_id: workflowRunId, group_id: groupId, group_run_path: groupRunPath, requested_by: requestedBy },
+            job_parameters: {
+              run_id: workflowRunId,
+              group_id: groupId,
+              group_run_path: groupRunPath,
+              requested_by: requestedBy,
+            },
           });
-          if (!result.ok || !result.data.run_id) throw new Error(result.ok ? 'The workflow returned no run ID.' : String(result.error));
+          if (!result.ok || !result.data.run_id)
+            throw new Error(result.ok ? 'The workflow returned no run ID.' : String(result.error));
           const state = {
             groupId,
             workflowRunId,
@@ -1109,9 +1440,10 @@ await createApp({
           const jobId = process.env.DATABRICKS_JOB_DASHBOARD_IMPORT;
           response.status(202).json({
             ...state,
-            runUrl: jobId && (process.env.DATABRICKS_WORKSPACE_URL || process.env.DATABRICKS_HOST)
-              ? `${(process.env.DATABRICKS_WORKSPACE_URL || process.env.DATABRICKS_HOST)?.replace(/\/$/, '')}/jobs/${jobId}`
-              : null,
+            runUrl:
+              jobId && (process.env.DATABRICKS_WORKSPACE_URL || process.env.DATABRICKS_HOST)
+                ? `${(process.env.DATABRICKS_WORKSPACE_URL || process.env.DATABRICKS_HOST)?.replace(/\/$/, '')}/jobs/${jobId}`
+                : null,
           });
         } catch (error) {
           response.status(400).json({
@@ -1131,25 +1463,36 @@ await createApp({
           const volume = volumeHandle(request);
           const groupRunPath = await groupWorkspacePath(request, activeVolumeRoot, groupId);
           const state = JSON.parse(await volume.read(`${groupRunPath}/import/workflow-run.json`)) as {
-            workflowRunId: string; databricksRunId: number; requestedBy: string; submittedAt: string;
+            workflowRunId: string;
+            databricksRunId: number;
+            requestedBy: string;
+            submittedAt: string;
           };
           const run = await appkit.jobs('dashboard_import').getRun(state.databricksRunId);
           if (!run.ok) throw new Error(String(run.error));
-          const summary = await volume.read(`${groupRunPath}/import/summary.json`).then((text) => JSON.parse(text) as { status?: string }).catch(() => null);
+          const summary = await volume
+            .read(`${groupRunPath}/import/summary.json`)
+            .then((text) => JSON.parse(text) as { status?: string })
+            .catch(() => null);
           const jobId = process.env.DATABRICKS_JOB_DASHBOARD_IMPORT;
           response.json({
             ...state,
             lifeCycleState: String(run.data.state?.life_cycle_state ?? 'PENDING'),
             resultState: summary?.status === 'SUCCESS' ? 'SUCCESS' : String(run.data.state?.result_state ?? ''),
-            tasks: (run.data.tasks ?? []).map((task) => ({ taskKey: task.task_key, lifeCycleState: String(task.state?.life_cycle_state ?? 'PENDING'), resultState: String(task.state?.result_state ?? '') })),
+            tasks: (run.data.tasks ?? []).map((task) => ({
+              taskKey: task.task_key,
+              lifeCycleState: String(task.state?.life_cycle_state ?? 'PENDING'),
+              resultState: String(task.state?.result_state ?? ''),
+            })),
             artifactPaths: {
               dashboardResult: `${groupRunPath}/import/summary.json`,
               dashboardConfig: `${groupRunPath}/import/workbooks`,
               audit: `${groupRunPath}/import/summary.json`,
             },
-            runUrl: jobId && (process.env.DATABRICKS_WORKSPACE_URL || process.env.DATABRICKS_HOST)
-              ? `${(process.env.DATABRICKS_WORKSPACE_URL || process.env.DATABRICKS_HOST)?.replace(/\/$/, '')}/jobs/${jobId}`
-              : null,
+            runUrl:
+              jobId && (process.env.DATABRICKS_WORKSPACE_URL || process.env.DATABRICKS_HOST)
+                ? `${(process.env.DATABRICKS_WORKSPACE_URL || process.env.DATABRICKS_HOST)?.replace(/\/$/, '')}/jobs/${jobId}`
+                : null,
           });
         } catch (error) {
           response.status(404).json({ error: 'No Dashboard Import Job run is available for this group.' });
@@ -1173,8 +1516,11 @@ await createApp({
           const groupRunPath = await groupWorkspacePath(request, activeVolumeRoot, groupId);
           const manifestPath = `${groupRunPath}/group-migration-manifest.json`;
           await volume.read(manifestPath);
-          const importSummary = JSON.parse(await volume.read(`${groupRunPath}/import/summary.json`)) as { status?: string };
-          if (importSummary.status !== 'SUCCESS') throw new Error('Dashboard reconciliation must pass before Semantic Build.');
+          const importSummary = JSON.parse(await volume.read(`${groupRunPath}/import/summary.json`)) as {
+            status?: string;
+          };
+          if (importSummary.status !== 'SUCCESS')
+            throw new Error('Dashboard reconciliation must pass before Semantic Build.');
           const [metricPrompt, agentPrompt] = await Promise.all([
             volume.read(`${groupRunPath}/mapping/prompts/metric-view-prompt.md`),
             volume.read(`${groupRunPath}/mapping/prompts/genie-agent-prompt.md`),
@@ -1261,7 +1607,8 @@ await createApp({
               ])
             )
           );
-          const audit = await volume.read(artifactPaths.audit)
+          const audit = await volume
+            .read(artifactPaths.audit)
             .then((text) => JSON.parse(text) as { status?: string })
             .catch(() => null);
           const resultState = audit?.status?.startsWith('COMPLETE')
@@ -1299,25 +1646,33 @@ await createApp({
           const groupRunPath = await groupWorkspacePath(request, activeVolumeRoot, groupId);
           const semanticPath = `${groupRunPath}/semantic`;
           const readJson = async (path: string) => JSON.parse(await volume.read(path)) as Record<string, unknown>;
-          const [manifest, dashboardSummary, metricView, metricExceptions, agent, audit, promotion] = await Promise.all([
-            readJson(`${groupRunPath}/group-migration-manifest.json`),
-            readJson(`${groupRunPath}/import/summary.json`),
-            readJson(`${semanticPath}/metric-view-result.json`),
-            readJson(`${semanticPath}/metric-view-exceptions.json`).catch(() => ({ exceptions: [] })),
-            readJson(`${semanticPath}/genie-agent-result.json`),
-            readJson(`${semanticPath}/semantic-audit.json`),
-            readJson(`${semanticPath}/promotion.json`).catch(() => null),
-          ]);
-          const workspaceUrl = (process.env.DATABRICKS_WORKSPACE_URL || process.env.DATABRICKS_HOST)?.replace(/\/$/, '');
+          const [manifest, dashboardSummary, metricView, metricExceptions, agent, audit, promotion] = await Promise.all(
+            [
+              readJson(`${groupRunPath}/group-migration-manifest.json`),
+              readJson(`${groupRunPath}/import/summary.json`),
+              readJson(`${semanticPath}/metric-view-result.json`),
+              readJson(`${semanticPath}/metric-view-exceptions.json`).catch(() => ({ exceptions: [] })),
+              readJson(`${semanticPath}/genie-agent-result.json`),
+              readJson(`${semanticPath}/semantic-audit.json`),
+              readJson(`${semanticPath}/promotion.json`).catch(() => null),
+            ]
+          );
+          const workspaceUrl = (process.env.DATABRICKS_WORKSPACE_URL || process.env.DATABRICKS_HOST)?.replace(
+            /\/$/,
+            ''
+          );
           const metricViewFqn = String(metricView.metric_view_fqn ?? manifest.candidate_metric_view_fqn ?? '');
           const metricViewParts = metricViewFqn.split('.');
           const agentDetails = (agent.genie_agent ?? {}) as { space_id?: string; url_path?: string };
-          const dashboards = ((dashboardSummary.dashboards ?? []) as Array<Record<string, unknown>>).map((dashboard) => ({
-            ...dashboard,
-            url: workspaceUrl && dashboard.dashboard_id
-              ? `${workspaceUrl}/sql/dashboardsv3/${dashboard.dashboard_id}`
-              : null,
-          }));
+          const dashboards = ((dashboardSummary.dashboards ?? []) as Array<Record<string, unknown>>).map(
+            (dashboard) => ({
+              ...dashboard,
+              url:
+                workspaceUrl && dashboard.dashboard_id
+                  ? `${workspaceUrl}/sql/dashboardsv3/${dashboard.dashboard_id}`
+                  : null,
+            })
+          );
           response.json({
             manifest,
             dashboardSummary: { ...dashboardSummary, dashboards },
@@ -1327,14 +1682,16 @@ await createApp({
             audit,
             promotion,
             links: {
-              metricView: workspaceUrl && metricViewParts.length === 3
-                ? `${workspaceUrl}/explore/data/${metricViewParts.map(encodeURIComponent).join('/')}`
-                : null,
-              genieAgent: workspaceUrl && agentDetails.url_path
-                ? `${workspaceUrl}${agentDetails.url_path}`
-                : workspaceUrl && agentDetails.space_id
-                  ? `${workspaceUrl}/genie/rooms/${agentDetails.space_id}`
+              metricView:
+                workspaceUrl && metricViewParts.length === 3
+                  ? `${workspaceUrl}/explore/data/${metricViewParts.map(encodeURIComponent).join('/')}`
                   : null,
+              genieAgent:
+                workspaceUrl && agentDetails.url_path
+                  ? `${workspaceUrl}${agentDetails.url_path}`
+                  : workspaceUrl && agentDetails.space_id
+                    ? `${workspaceUrl}/genie/rooms/${agentDetails.space_id}`
+                    : null,
             },
           });
         } catch (error) {
@@ -1413,9 +1770,13 @@ await createApp({
           const fixNow = parsed.data.decisions.filter((decision) => decision.disposition === 'fix_now');
           const byStage = (stage: 'Dashboard import' | 'Metric View' | 'Genie Agent') =>
             fixNow.filter((decision) => decision.stage === stage);
-          const formatGaps = (decisions: typeof fixNow) => decisions
-            .map((decision) => `- ${decision.gapKey} [${decision.severity}] ${decision.type}: ${decision.detail}${decision.notes ? ` Reviewer note: ${decision.notes}` : ''}`)
-            .join('\n');
+          const formatGaps = (decisions: typeof fixNow) =>
+            decisions
+              .map(
+                (decision) =>
+                  `- ${decision.gapKey} [${decision.severity}] ${decision.type}: ${decision.detail}${decision.notes ? ` Reviewer note: ${decision.notes}` : ''}`
+              )
+              .join('\n');
           const dashboardPrompt = [
             '# Genie Code — Repair existing dashboards in place',
             '',
@@ -1423,9 +1784,10 @@ await createApp({
             `Dashboard reconciliation: ${groupRunPath}/import/summary.json`,
             '',
             'Do not run `/importBI`. Do not create a new dashboard. Update only the existing dashboard IDs listed below.',
-            ...((dashboardSummary.dashboards ?? []).map((dashboard) =>
-              `- ${dashboard.workbook_name}: dashboard ${dashboard.dashboard_id}; config ${dashboard.config_path}`
-            )),
+            ...(dashboardSummary.dashboards ?? []).map(
+              (dashboard) =>
+                `- ${dashboard.workbook_name}: dashboard ${dashboard.dashboard_id}; config ${dashboard.config_path}`
+            ),
             '',
             'Apply only these approved fixes:',
             formatGaps(byStage('Dashboard import')) || '- No dashboard fixes selected.',
@@ -1519,7 +1881,10 @@ await createApp({
           chunks.push(buffer);
         }
         const contents = Buffer.concat(chunks);
-        const volumeRelativePath = `bi-migrations/${activeMigrationName}/inputs/${['.twb', '.twbx'].includes(extension) ? 'workbooks' : 'mappings'}/${storageFileName}`;
+        const isDashboardAsset = ['.twb', '.twbx'].includes(extension);
+        const isDatasourceAsset = ['.tds', '.tdsx'].includes(extension);
+        const inputDirectory = isDashboardAsset ? 'workbooks' : isDatasourceAsset ? 'datasources' : 'mappings';
+        const volumeRelativePath = `bi-migrations/${activeMigrationName}/inputs/${inputDirectory}/${storageFileName}`;
         if (!selectedVolume) {
           response.status(400).json({ error: 'Choose a writable Unity Catalog Volume before uploading.' });
           return;
@@ -1532,11 +1897,13 @@ await createApp({
           name: storageFileName,
           sizeBytes: contents.length,
           status: 'uploaded',
-          kind: ['.twb', '.twbx'].includes(extension) ? 'Tableau workbook' : 'Mapping evidence',
+          kind: isDashboardAsset ? 'Tableau workbook' : isDatasourceAsset ? 'Tableau datasource' : 'Mapping evidence',
           volumePath: `${selectedVolume}/${volumeRelativePath}`,
         };
         const nextFiles = [...uploadedFiles.filter((item) => item.name !== storageFileName), record];
-        await volume.upload(uploadManifestPath(selectedVolume), JSON.stringify(nextFiles, null, 2), { overwrite: true });
+        await volume.upload(uploadManifestPath(selectedVolume), JSON.stringify(nextFiles, null, 2), {
+          overwrite: true,
+        });
         response.status(201).json({
           name: storageFileName,
           originalName: fileName,
@@ -1549,15 +1916,90 @@ await createApp({
       });
 
       app.post('/api/uploads/process', async (request, response) => {
-        const parsedRequest = z.object({ volume: z.string().min(1) }).safeParse(request.body);
-        const selectedVolume = parsedRequest.success ? volumePathFromName(parsedRequest.data.volume) : activeVolumeRoot;
+        const parsedRequest = z
+          .object({
+            volume: z.string().optional().default(''),
+            mode: migrationModeSchema.optional().default(activeMigrationMode),
+            inputMethod: z.enum(['upload', 'volume']).optional().default('upload'),
+            datasourcePath: z.string().optional().default(''),
+            mappingPath: z.string().optional().default(''),
+          })
+          .safeParse(request.body);
+        if (!parsedRequest.success) {
+          response.status(400).json({ error: parsedRequest.error.issues[0]?.message ?? 'Invalid migration inputs.' });
+          return;
+        }
+        const selectedVolume = parsedRequest.data.volume
+          ? volumePathFromName(parsedRequest.data.volume)
+          : activeVolumeRoot || volumeRootFromPath(parsedRequest.data.datasourcePath);
+        activeMigrationMode = parsedRequest.data.mode;
         const files = await readUploadManifest(request, selectedVolume);
-        if (files.length === 0) {
-          response.status(400).json({ error: 'Upload at least one Tableau workbook first.' });
+        if (parsedRequest.data.inputMethod === 'upload' && files.length === 0) {
+          response.status(400).json({
+            error:
+              activeMigrationMode === 'semantic_model'
+                ? 'Upload at least one Tableau datasource and mapping file first.'
+                : 'Upload at least one Tableau workbook first.',
+          });
           return;
         }
         if (processingStatus === 'running') {
-          response.status(409).json({ error: 'Inventory processing is already running.' });
+          response.status(409).json({ error: 'Migration input processing is already running.' });
+          return;
+        }
+        if (activeMigrationMode === 'semantic_model') {
+          if (parsedRequest.data.inputMethod === 'upload') {
+            if (!files.some((file) => file.kind === 'Tableau datasource')) {
+              response.status(400).json({ error: 'Upload at least one .tds or .tdsx datasource.' });
+              return;
+            }
+            if (!files.some((file) => /^table-mapping\.(csv|ya?ml)$/i.test(file.name))) {
+              response
+                .status(400)
+                .json({ error: 'Upload the mapping as table-mapping.csv, table-mapping.yaml, or table-mapping.yml.' });
+              return;
+            }
+          }
+          let inputRoot = `${migrationRoot(selectedVolume)}/inputs`;
+          if (parsedRequest.data.inputMethod === 'volume') {
+            const paths = z
+              .object({
+                datasourcePath: absoluteVolumePathSchema,
+                mappingPath: absoluteVolumePathSchema,
+              })
+              .safeParse(parsedRequest.data);
+            if (!paths.success) {
+              response.status(400).json({ error: paths.error.issues[0]?.message ?? 'Enter valid Volume input paths.' });
+              return;
+            }
+            try {
+              inputRoot = semanticInputRoot(paths.data.datasourcePath, paths.data.mappingPath);
+            } catch (error) {
+              response
+                .status(400)
+                .json({ error: error instanceof Error ? error.message : 'Invalid semantic input paths.' });
+              return;
+            }
+          }
+          const jobResult = await appkit.jobs('semantic_proposal').runNow({
+            job_parameters: { input_volume_path: inputRoot },
+          });
+          if (!jobResult.ok || !jobResult.data.run_id) {
+            processingStatus = 'failed';
+            processingMessage = 'Semantic grouping Job submission failed.';
+            response.status(502).json({ error: processingMessage });
+            return;
+          }
+          processingJobKey = 'semantic_proposal';
+          processingStatus = 'running';
+          inventoryRunId = jobResult.data.run_id;
+          processingMessage = `Semantic grouping job run ${jobResult.data.run_id} submitted.`;
+          response.status(202).json({
+            status: processingStatus,
+            message: processingMessage,
+            runId: jobResult.data.run_id,
+            runUrl: workspaceRunUrl(process.env.DATABRICKS_JOB_SEMANTIC_PROPOSAL, jobResult.data.run_id),
+          });
           return;
         }
         const namespaces = new Map<string, { catalog: string; schema: string }>();
@@ -1603,6 +2045,7 @@ await createApp({
           return;
         }
         processingStatus = 'running';
+        processingJobKey = 'inventory';
         inventoryRunId = jobResult.data.run_id;
         processingMessage = `Inventory job run ${jobResult.data.run_id} submitted.`;
         response.status(202).json({
@@ -1631,7 +2074,7 @@ await createApp({
           if (!activeVolumeRoot) throw new Error('The run Volume is not selected.');
           const outputRoot = `${migrationRoot(activeVolumeRoot)}/inventory`;
           const volume = volumeHandle(request);
-          const readRunJson = async <T,>(relativePath: string) =>
+          const readRunJson = async <T>(relativePath: string) =>
             JSON.parse(await volume.read(`${outputRoot}/${relativePath}`)) as T;
           const mappingFile = `uploaded-${groupId}.yaml`;
           const [readiness, sourceInventory, groups, mappingContract] = await Promise.all([
@@ -1650,34 +2093,32 @@ await createApp({
             }>(`groups/${groupId}/readiness_report.json`),
             readRunJson<SourceAsset[]>(`groups/${groupId}/source_inventory.json`),
             readRunJson<SemanticGroup[]>('groups.json'),
-            volume
-              .read(`${outputRoot}/groups/${groupId}/mappings/domains/${mappingFile}`)
-              .then(
-                (contents) =>
-                    parseYaml(contents) as {
-                      status: string;
-                      kpis?: Array<{
-                        legacy_name: string;
-                        legacy_expression: string;
-                        aliases?: string[];
-                        assets?: string[];
-                      }>;
-                      workbook_helpers?: Array<{ name: string; assets?: string[]; datasources?: string[] }>;
-                      relationships?: Array<Record<string, unknown>>;
-                      fields: Array<{
-                        datasource: string;
-                        legacy: string;
-                        datatype: string;
-                        target_table?: string;
-                        target_expression?: string;
-                        source_table?: string;
-                        conversion?: string;
-                        confidence?: number;
-                        status: string;
-                        evidence?: string[];
-                      }>;
-                    }
-              ),
+            volume.read(`${outputRoot}/groups/${groupId}/mappings/domains/${mappingFile}`).then(
+              (contents) =>
+                parseYaml(contents) as {
+                  status: string;
+                  kpis?: Array<{
+                    legacy_name: string;
+                    legacy_expression: string;
+                    aliases?: string[];
+                    assets?: string[];
+                  }>;
+                  workbook_helpers?: Array<{ name: string; assets?: string[]; datasources?: string[] }>;
+                  relationships?: Array<Record<string, unknown>>;
+                  fields: Array<{
+                    datasource: string;
+                    legacy: string;
+                    datatype: string;
+                    target_table?: string;
+                    target_expression?: string;
+                    source_table?: string;
+                    conversion?: string;
+                    confidence?: number;
+                    status: string;
+                    evidence?: string[];
+                  }>;
+                }
+            ),
           ]);
           const semanticGroup = groups.find((group) => group.group_id === groupId);
           response.json({

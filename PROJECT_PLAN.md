@@ -424,6 +424,8 @@ This local-first path uses `/importBI` for semantic discovery while preventing u
 
 ### Central Metric-View Evaluation
 
+The detailed automated evaluation design, including non-numeric strategies for cases where Tableau and Databricks do not share comparable data, is defined in [`docs/METRIC_VIEW_EVALUATION_PLAN.md`](docs/METRIC_VIEW_EVALUATION_PLAN.md).
+
 Treat each generated local metric view as evidence, not as the unit of promotion. Extract and normalize its:
 
 - Source tables, joins, fact grain, security, and temporal semantics.
@@ -502,7 +504,7 @@ Review findings must not trigger a full `/importBI` rerun by default. The App re
 
 - Mapping-relevant gaps create a new contract revision; approved contracts are never overwritten in place.
 - Dashboard repairs reference the existing dashboard ID and explicitly update it in place without invoking `/importBI` or creating another dashboard.
-- Metric View repairs update only the candidate Metric View, then rerun deterministic Metric View validation.
+- Metric View repairs use a dedicated bounded workflow: deterministic evaluation produces blocking findings, rule-based repair is preferred, Genie Code handles semantic rewrites, and deterministic reevaluation controls retries. The workflow updates only the candidate Metric View, stops after five attempts or repeated failure signatures, and never allows Genie Code to approve its own output.
 - Genie Agent repairs update only the existing Space instructions, datasource, examples, or benchmark configuration.
 - A full workbook re-import is reserved for irreparable structural conversion failures.
 

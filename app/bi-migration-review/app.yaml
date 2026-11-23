@@ -12,3 +12,11 @@ env:
     valueFrom: semantic-job
   - name: DATABRICKS_JOB_DASHBOARD_IMPORT
     valueFrom: dashboard-import-job
+  - name: DATABRICKS_JOB_METRIC_VIEW_REPAIR
+    valueFrom: metric-view-repair-job
+  - name: DATABRICKS_JOB_SEMANTIC_PROPOSAL
+    valueFrom: ds-semantic-proposal-job
+  - name: DATABRICKS_JOB_SEMANTIC_MIGRATION
+    valueFrom: ds-semantic-migration-job
+  - name: DATASOURCE_SEMANTIC_OUTPUT_PATH
+    valueFrom: semantic-workflows

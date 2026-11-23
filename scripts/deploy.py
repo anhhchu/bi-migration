@@ -14,6 +14,12 @@ JOB_PARAMETERS = [
     {"name": "group_run_path", "default": ""},
     {"name": "requested_by", "default": ""},
 ]
+REPAIR_JOB_PARAMETERS = [
+    *JOB_PARAMETERS,
+    {"name": "attempt", "default": "1"},
+    {"name": "max_attempts", "default": "5"},
+    {"name": "repair_job_id", "default": ""},
+]
 ENVIRONMENTS = [
     {
         "environment_key": "semantic",
@@ -58,7 +64,7 @@ def placeholder_task(task_key: str, notebook_path: str, **extra: object) -> dict
     return notebook_task(task_key, notebook_path, {}, **extra)
 
 
-def common_settings(name: str, tasks: list[dict]) -> dict:
+def common_settings(name: str, tasks: list[dict], parameters: list[dict] | None = None) -> dict:
     return {
         "name": name,
         "edit_mode": "EDITABLE",
@@ -67,7 +73,7 @@ def common_settings(name: str, tasks: list[dict]) -> dict:
         "timeout_seconds": 0,
         "performance_target": "PERFORMANCE_OPTIMIZED",
         "queue": {"enabled": True},
-        "parameters": JOB_PARAMETERS,
+        "parameters": parameters or JOB_PARAMETERS,
         "environments": ENVIRONMENTS,
         "tags": {"aidevkit_project": "ai-dev-kit", "managed_by": "scripts/deploy.py"},
         "tasks": tasks,
@@ -91,8 +97,9 @@ def deploy_job(
     existing: dict | None,
     dry_run: bool,
     fields_to_remove: list[str] | None = None,
+    parameters: list[dict] | None = None,
 ) -> int:
-    settings = common_settings(name, update_tasks if existing else create_tasks)
+    settings = common_settings(name, update_tasks if existing else create_tasks, parameters)
     if dry_run:
         print(
             json.dumps(
@@ -131,6 +138,12 @@ def main() -> None:
     parser.add_argument("--target", default="default")
     parser.add_argument("--app-name", default="bi-migration-review")
     parser.add_argument("--component", choices=("all", "jobs", "app"), default="all")
+    parser.add_argument("--datasource-semantic-proposal-job-id", default="0")
+    parser.add_argument("--datasource-semantic-migration-job-id", default="0")
+    parser.add_argument(
+        "--datasource-semantic-volume-full-name",
+        default="main.bi_migration.semantic_workflows",
+    )
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
@@ -139,8 +152,10 @@ def main() -> None:
     notebooks = f"{bundle_root}/notebooks"
     dashboard_name = f"[{args.target}] BI migration dashboard import"
     semantic_name = f"[{args.target}] BI migration semantic build"
+    repair_name = f"[{args.target}] BI migration metric view repair"
     dashboard_existing = existing_job(args.profile, dashboard_name)
     semantic_existing = existing_job(args.profile, semantic_name)
+    repair_existing = existing_job(args.profile, repair_name)
 
     nested_import = {
         "task_key": "import_dashboard",
@@ -230,6 +245,64 @@ def main() -> None:
         ),
     ]
 
+    repair_metric_view = placeholder_task(
+        "repair_metric_view",
+        f"{notebooks}/genie_task_not_configured",
+        depends_on=[{"task_key": "prepare_metric_view_repair"}],
+        timeout_seconds=3600,
+    )
+    repair_tasks = [
+        notebook_task(
+            "prepare_metric_view_repair",
+            f"{notebooks}/prepare_metric_view_repair",
+            {
+                "run_id": "{{job.parameters.run_id}}",
+                "group_id": "{{job.parameters.group_id}}",
+                "group_run_path": "{{job.parameters.group_run_path}}",
+                "attempt": "{{job.parameters.attempt}}",
+                "max_attempts": "{{job.parameters.max_attempts}}",
+            },
+        ),
+        repair_metric_view,
+        notebook_task(
+            "validate_repaired_metric_view",
+            f"{notebooks}/validate_metric_view",
+            {
+                "run_id": "{{job.parameters.run_id}}",
+                "group_run_path": "{{job.parameters.group_run_path}}",
+                "fail_on_error": "false",
+            },
+            depends_on=[{"task_key": "repair_metric_view"}],
+            run_if="ALL_DONE",
+        ),
+        notebook_task(
+            "evaluate_repaired_metric_view",
+            f"{notebooks}/evaluate_metric_view",
+            {
+                "run_id": "{{job.parameters.run_id}}",
+                "group_run_path": "{{job.parameters.group_run_path}}",
+                "attempt": "{{job.parameters.attempt}}",
+            },
+            depends_on=[{"task_key": "validate_repaired_metric_view"}],
+            run_if="ALL_DONE",
+        ),
+        notebook_task(
+            "finalize_metric_view_repair",
+            f"{notebooks}/finalize_metric_view_repair",
+            {
+                "run_id": "{{job.parameters.run_id}}",
+                "group_id": "{{job.parameters.group_id}}",
+                "group_run_path": "{{job.parameters.group_run_path}}",
+                "requested_by": "{{job.parameters.requested_by}}",
+                "attempt": "{{job.parameters.attempt}}",
+                "max_attempts": "{{job.parameters.max_attempts}}",
+                "repair_job_id": "{{job.parameters.repair_job_id}}",
+            },
+            depends_on=[{"task_key": "evaluate_repaired_metric_view"}],
+            run_if="ALL_DONE",
+        ),
+    ]
+
     if args.component in {"all", "jobs"}:
         dashboard_job_id = deploy_job(
             args.profile,
@@ -248,11 +321,33 @@ def main() -> None:
             args.dry_run,
             ["tasks/audit_semantic_assets/depends_on"],
         )
+        repair_job_id = deploy_job(
+            args.profile,
+            repair_name,
+            repair_tasks,
+            [repair_tasks[0], repair_tasks[2], repair_tasks[3], repair_tasks[4]],
+            repair_existing,
+            args.dry_run,
+            parameters=REPAIR_JOB_PARAMETERS,
+        )
+        if not args.dry_run:
+            repair_parameters = [
+                parameter | ({"default": str(repair_job_id)} if parameter["name"] == "repair_job_id" else {})
+                for parameter in REPAIR_JOB_PARAMETERS
+            ]
+            run_cli(
+                args.profile,
+                "jobs",
+                "update",
+                "--json",
+                json.dumps({"job_id": repair_job_id, "new_settings": {"parameters": repair_parameters}}),
+            )
     else:
-        if not dashboard_existing or not semantic_existing:
+        if not dashboard_existing or not semantic_existing or not repair_existing:
             raise RuntimeError("Deploy the Jobs before deploying the App in a new workspace.")
         dashboard_job_id = int(dashboard_existing["job_id"])
         semantic_job_id = int(semantic_existing["job_id"])
+        repair_job_id = int(repair_existing["job_id"])
     if args.dry_run:
         if args.component == "app":
             print(
@@ -262,6 +357,10 @@ def main() -> None:
                         "app_name": args.app_name,
                         "dashboard_import_job_id": dashboard_job_id,
                         "semantic_build_job_id": semantic_job_id,
+                        "metric_view_repair_job_id": repair_job_id,
+                        "datasource_semantic_proposal_job_id": int(args.datasource_semantic_proposal_job_id),
+                        "datasource_semantic_migration_job_id": int(args.datasource_semantic_migration_job_id),
+                        "datasource_semantic_volume_full_name": args.datasource_semantic_volume_full_name,
                     },
                     indent=2,
                 )
@@ -271,6 +370,10 @@ def main() -> None:
     deployed = {
         "dashboard_import_job_id": dashboard_job_id,
         "semantic_build_job_id": semantic_job_id,
+        "metric_view_repair_job_id": repair_job_id,
+        "datasource_semantic_proposal_job_id": int(args.datasource_semantic_proposal_job_id),
+        "datasource_semantic_migration_job_id": int(args.datasource_semantic_migration_job_id),
+        "datasource_semantic_volume_full_name": args.datasource_semantic_volume_full_name,
     }
     if args.component == "jobs":
         print(json.dumps(deployed, indent=2))
@@ -286,6 +389,14 @@ def main() -> None:
         f"dashboard_import_job_id={dashboard_job_id}",
         "--var",
         f"semantic_build_job_id={semantic_job_id}",
+        "--var",
+        f"metric_view_repair_job_id={repair_job_id}",
+        "--var",
+        f"datasource_semantic_proposal_job_id={args.datasource_semantic_proposal_job_id}",
+        "--var",
+        f"datasource_semantic_migration_job_id={args.datasource_semantic_migration_job_id}",
+        "--var",
+        f"datasource_semantic_volume_full_name={args.datasource_semantic_volume_full_name}",
     )
     run_cli(
         args.profile,
