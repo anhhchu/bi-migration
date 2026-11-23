@@ -39,3 +39,9 @@ History is minimal, so use short imperative commit subjects such as `Fix approve
 ## Databricks Safety
 
 Always pass `--profile DEFAULT` for workspace CLI commands. Store production workflow inputs and outputs in configured Unity Catalog Volumes; do not embed local filesystem paths in generated manifests or prompts.
+
+Never set `DATABRICKS_AUTH_STORAGE=plaintext` when invoking the Databricks CLI. Use the profile's standard OAuth credential storage and refresh it with `databricks auth login --profile DEFAULT` when required.
+
+## Databricks Job Runs
+
+Do not rerun a Databricks Job merely to verify a deployment or repeatedly poll an active run. When execution is required, trigger the Job once with `--no-wait`, report the Databricks run URL immediately, and let the user monitor or repair the run in the workspace. Inspect completed output only when the user explicitly asks for analysis or troubleshooting.

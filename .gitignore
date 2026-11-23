@@ -2,8 +2,10 @@
 .venv/
 __pycache__/
 *.py[cod]
+.DS_Store
 build/
 dist/
+.databricks/genie-code-*.json
 
 # Downloaded BI sample binaries stay local or in a governed UC Volume.
 samples/**
@@ -13,3 +15,6 @@ samples/**
 
 V1_PLAN.md
 V2_PLAN.md
+docs/BUG_REPORT_MIGRATION_STATE.md
+workflows/datasource-semantic-migration/METRIC-VIEW-EVALUATION-REPAIR-PLAN.md
+workflows/datasource-semantic-migration/datasource-samples/
