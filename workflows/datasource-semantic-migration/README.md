@@ -88,15 +88,10 @@ The login command opens a browser for OAuth authentication. Do not use a persona
 
 ## Configure a New Environment
 
-Discover the workspace resources that will be referenced by the bundle:
+The workflow needs five workspace values: output Volume, candidate catalog and schema, staging schema, and SQL warehouse. They are not stored in `databricks.yml`. Set them in one of two ways:
 
-```bash
-databricks warehouses list --profile <profile-name>
-databricks catalogs list --profile <profile-name>
-databricks schemas list <catalog> --profile <profile-name>
-```
-
-In `databricks.yml`, add one target per environment. The target name is a local deployment label; it does not need to match the CLI profile name. Use the same target and profile together for validation, deployment, and runs:
+- **Recommended:** from the repository root, run `python3 scripts/install.py --profile <profile-name> --catalog <catalog>`. It creates missing schemas and Volumes and saves the values for that profile. If they already exist, add `--configure-only` to save the values without deploying.
+- **Manual:** add your own target to `databricks.yml`:
 
 ```yaml
 targets:
@@ -108,28 +103,28 @@ targets:
       candidate_schema: bi_migration
       staging_schema: bi_migration_staging
       warehouse_id: <warehouse-id>
-      analysis_batch_size: 25
-      analysis_batch_workers: 8
 ```
 
-Do not copy the repository's example catalog, warehouse ID, or Volume path into another workspace. Replace every placeholder with resources from that environment. The workflow creates run folders and candidate Metric Views; it does not create catalogs, schemas, Volumes, warehouses, or mapped source tables.
+With the manual option, replace every placeholder with resources from that workspace. The workflow creates run folders and candidate Metric Views; it does not create catalogs, schemas, Volumes, warehouses, or mapped source tables (`install.py` creates the schemas and Volumes for you).
 
 The default repair limit is three attempts. Acceptance thresholds are defined in `src/datasource_semantic_migration/metric_repair.py`; relationship policy is documented in `config/default-policy.yaml`.
 
 ## Install and Deploy
 
-From this directory:
+> **Simplest path:** to install this workflow together with the review App, run `python3 scripts/install.py --profile <profile> --catalog <catalog>` from the repository root. It creates the schemas and Volumes, sets these variables, and deploys everything. The steps below are for deploying the workflow on its own.
+
+From this directory (use your own target name instead of `dev` if you added one):
 
 ```bash
 uv sync
 uv run pytest
 databricks bundle validate \
-  --target customer-dev \
+  --target dev \
   --profile <profile-name>
 
 uv run python deploy.py \
   --profile <profile-name> \
-  --target customer-dev
+  --target dev
 ```
 
 `deploy.py` performs these operations:
@@ -147,7 +142,7 @@ Use `--recreate-automation` only when a stored Genie Code automation must be rep
 ```bash
 uv run python deploy.py \
   --profile <profile-name> \
-  --target customer-dev \
+  --target dev \
   --recreate-automation
 ```
 
@@ -188,7 +183,7 @@ Local conversion output is written beneath `build/tdsx-conversion/`.
 
 ```bash
 databricks bundle run datasource_semantic_orchestrator \
-  --target customer-dev \
+  --target dev \
   --profile <profile-name> \
   --params input_volume_path=/Volumes/<catalog>/<schema>/<volume>/<project>
 ```
@@ -208,7 +203,7 @@ Open `reports/semantic-grouping-review.html` for the proposal run. Its **Approve
 
 ```bash
 databricks bundle run datasource_semantic_migration \
-  --target customer-dev \
+  --target dev \
   --profile <profile-name> \
   --params proposal_run_id=<proposal-run-id>
 ```
@@ -235,7 +230,7 @@ Repair an existing candidate without rebuilding it:
 
 ```bash
 databricks bundle run datasource_semantic_repair \
-  --target customer-dev \
+  --target dev \
   --profile <profile-name> \
   --params group_path=/Volumes/<catalog>/<schema>/<volume>/runs/<run-id>--<UTC-start-time>/groups/<group-slug>
 ```

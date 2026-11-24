@@ -1,181 +1,69 @@
 # bi-migration-review
 
-A Databricks App powered by [AppKit](https://developers.databricks.com/docs/appkit/v0/), featuring React, TypeScript, and Tailwind CSS.
+Databricks App ([AppKit](https://developers.databricks.com/docs/appkit/v0/), React, TypeScript) for migrating Tableau semantic models to Unity Catalog Metric Views. It is the front end for the [datasource semantic workflow](../../workflows/datasource-semantic-migration/README.md); the Jobs do the work, the App starts them and shows the results.
 
-**Enabled plugins:**
+## What users do
 
-- **Server** -- Express HTTP server with static file serving and Vite dev mode
+| Step       | In the App                                                                                     | Job it runs                      |
+| ---------- | ---------------------------------------------------------------------------------------------- | -------------------------------- |
+| 1. Propose | Upload `.tds`/`.tdsx` + `table-mapping.yaml`, or point to existing Volume files                | Propose semantic groups          |
+| 2. Approve | Check each group's datasources and target tables, then approve                                 | Migrate approved semantic groups |
+| 3. Review  | Per group: release gate stages, grouped action items, Catalog Explorer link, full HTML reports | Semantic group and repair Jobs   |
 
-## Prerequisites
+The Home page explains the evaluation method. **Installation guide** and **Mapping guide** open from the header (`docs/`).
 
-- Node.js v22+ and npm
-- Databricks CLI (for deployment)
-- Access to a Databricks workspace
+Dashboard migration is hidden while it is being fixed: set `DASHBOARD_MIGRATION_ENABLED` in `client/src/lib/features.ts` to bring it back.
 
-## Databricks Authentication
+## Run locally
 
-### Local Development
-
-For local development, configure your environment variables by creating a `.env` file:
-
-```bash
-cp .env.example .env
-```
-
-Edit `.env` and set the environment variables you need:
-
-```env
-DATABRICKS_HOST=https://your-workspace.cloud.databricks.com
-DATABRICKS_APP_PORT=8000
-# ... other environment variables, depending on the plugins you use
-```
-
-### CLI Authentication
-
-The Databricks CLI requires authentication to deploy and manage apps. Configure authentication using one of these methods:
-
-#### OAuth U2M
-
-Interactive browser-based authentication with short-lived tokens:
+Prerequisites: Node.js 22+, Databricks CLI with an OAuth profile, deployed workflow Jobs.
 
 ```bash
-databricks auth login --host https://your-workspace.cloud.databricks.com
-```
-
-This will open your browser to complete authentication. The CLI saves credentials to `~/.databrickscfg`.
-
-#### Configuration Profiles
-
-Use multiple profiles for different workspaces:
-
-```ini
-[DEFAULT]
-host = https://dev-workspace.cloud.databricks.com
-
-[production]
-host = https://prod-workspace.cloud.databricks.com
-client_id = prod-client-id
-client_secret = prod-client-secret
-```
-
-Deploy using a specific profile:
-
-```bash
-databricks bundle deploy --profile production
-```
-
-**Note:** Personal Access Tokens (PATs) are legacy authentication. OAuth is strongly recommended for better security.
-
-## Getting Started
-
-### Install Dependencies
-
-```bash
+cp .env.example .env   # fill in workspace, Volume, and Job IDs
 npm install
+npm run dev            # http://localhost:8000
 ```
 
-### Development
+Locally the App calls Databricks as your CLI profile; when deployed it reads Volumes as the signed-in user and starts Jobs as its service principal.
 
-Run the app in development mode with hot reload:
-
-```bash
-npm run dev
-```
-
-The app will be available at the URL shown in the console output.
-
-### Build
-
-Build both client and server for production:
+## Checks
 
 ```bash
+npm run typecheck
+npm test
+npm run lint
+npm run format
 npm run build
 ```
 
-This creates:
+## Deploy
 
-- `dist/server.js` - Compiled server bundle
-- `client/dist/` - Bundled client assets
-
-### Production
-
-Run the production build:
+First-time install (workflow and App together), from the repository root:
 
 ```bash
-npm start
+python3 scripts/install.py --profile my-ws --catalog <existing-catalog>
 ```
 
-## Code Quality
-
-There are a few commands to help you with code quality:
+Redeploy only the App after changes:
 
 ```bash
-# Type checking
-npm run typecheck
-
-# Linting
-npm run lint
-npm run lint:fix
-
-# Formatting
-npm run format
-npm run format:fix
+python3 scripts/deploy.py --profile my-ws --target dev --component app
 ```
 
-## Deployment with Databricks Asset Bundles
+Use these scripts rather than `databricks apps deploy`; they bind the Jobs and Volumes to the App. See [docs/INSTALLATION_GUIDE.md](docs/INSTALLATION_GUIDE.md).
 
-### 1. Configure Bundle
-
-Update `databricks.yml` with your workspace settings:
-
-```yaml
-targets:
-  default:
-    workspace:
-      host: https://your-workspace.cloud.databricks.com
-```
-
-Make sure to replace all placeholder values in `databricks.yml` with your actual resource IDs.
-
-### 2. Deploy
-
-Deploy and start the app with a single command:
-
-```bash
-databricks apps deploy
-```
-
-`databricks apps deploy` validates the project, deploys it, starts the app, and prints its URL.
-
-### Deploy to Production
-
-1. Configure the production target in `databricks.yml`
-2. Deploy to production:
-
-```bash
-databricks apps deploy -t prod
-```
-
-> **Restarting a stopped app:** apps stop after a period of inactivity. To start one again without redeploying, run `databricks apps start <APP_NAME>`.
-
-## Project Structure
+## Project layout
 
 ```
-* client/          # React frontend
-  * src/           # Source code
-  * public/        # Static assets
-* server/          # Express backend
-  * server.ts      # Server entry point
-  * routes/        # Routes
-* shared/          # Shared types
-* databricks.yml   # Bundle configuration
-* app.yaml         # App configuration
-* .env.example     # Environment variables example
+client/src/
+  App.tsx            Steps, run browser, group review
+  HomePage.tsx       Landing page and evaluation method
+  DocsDialog.tsx     Renders docs/*.md in the App
+  lib/               Status labels, saved inputs, Catalog Explorer links, feature switches
+client/public/       Static assets (Home page screenshot)
+server/
+  server.ts          API routes: uploads, Volume inputs, runs, approval, Job status
+  semantic-input.ts  Input-folder validation
+docs/                Installation and mapping guides
+app.yaml             App command and resource bindings
 ```
-
-## Tech Stack
-
-- **Backend**: Node.js, Express
-- **Frontend**: React.js, TypeScript, Vite, Tailwind CSS, React Router
-- **UI Components**: Radix UI, shadcn/ui
-- **Databricks**: AppKit SDK

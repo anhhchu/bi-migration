@@ -1,158 +1,81 @@
 # BI Migration Blueprint
 
-BI Migration Blueprint is a Databricks control plane for migrating Tableau workbooks at portfolio scale. It inventories `.twb` and `.twbx` files, groups related workbooks into semantic domains, compiles source-to-Databricks mapping contracts, orchestrates `/importBI`, and reviews the resulting dashboards, Unity Catalog Metric Views, Genie Agents, and migration gaps.
+Migrate Tableau semantic models to governed Unity Catalog **Metric Views**. Point the workflow at Tableau datasource files (`.tds`/`.tdsx`) and a table mapping; it groups them into semantic domains, builds one candidate Metric View per group, evaluates it, repairs what it can automatically, and leaves people only the decisions that need them. A Databricks App drives the whole flow.
 
-## Workflow
+> **Supported today:** datasource semantic migration. Dashboard migration (`.twb`/`.twbx` → AI/BI dashboards) is paused while it is being fixed; its code is still in the repository but hidden in the App.
 
-1. **Upload assets** — land Tableau workbooks and optional mapping documents in a Unity Catalog Volume.
-2. **Run inventory** — parse workbook metadata, datasource fields, calculations, relationships, and dependencies.
-3. **Review groups and mappings** — resolve physical target fields, joins, grain, and temporal rules; approve a versioned YAML contract.
-4. **Build assets** — import dashboards in parallel, reconcile dashboard IDs/configurations, build and validate a unified Metric View, then create the Genie Agent.
-5. **Review results** — open generated assets and disposition migration gaps by severity and stage.
-6. **Remediate or promote** — generate targeted in-place repair prompts or record the final production naming decision.
+## How it works
 
-The application never reruns `/importBI` for ordinary remediation. Dashboard repair prompts reference existing dashboard IDs; Metric View and Agent repairs update their existing candidate assets.
+| Step       | What happens                                                                                                       |
+| ---------- | ------------------------------------------------------------------------------------------------------------------ |
+| 1. Propose | Inventory the datasources, parse fields and calculations, and propose readable semantic groups (Genie Code)        |
+| 2. Approve | Review each group's datasources and Databricks target tables in the App, then approve                              |
+| 3. Review  | Each group gets a candidate Metric View, a release gate (Translation → Certify), and action items grouped by owner |
 
-## Repository Layout
+Evaluation checks translation, contract (grain and additivity), and design (structure and query execution). Parity with Tableau numbers, performance, and certification are reported as "not run" until those steps exist. Details: [workflow README](workflows/datasource-semantic-migration/README.md).
 
-- `src/bi_migration/` — deterministic Python inventory, parsing, grouping, mapping, and readiness pipeline.
-- `app/bi-migration-review/` — Databricks AppKit server and React application.
-- `notebooks/` — inspectable Lakeflow Job tasks for inventory, reconciliation, validation, and audit.
-- `scripts/deploy.py` — creates/reconciles editable Jobs, deploys the bundle, and deploys the App.
-- `scripts/generate_importbi_bitemporal_data.py` — repeatable Superstore bitemporal test-data generator.
-- `prompts/`, `schemas/`, `skills/` — prompt contracts, mapping schema, and mapping extraction guidance.
-- `tests/` — pytest coverage and small Tableau fixtures.
+## Install
 
-## Local Development
-
-Prerequisites: Python 3.11+, `uv`, Node.js/npm, Databricks CLI, and an authenticated Databricks profile.
+Prerequisites: [Databricks CLI](https://docs.databricks.com/dev-tools/cli/install.html) 1.0+, Python 3.11+, and [uv](https://docs.astral.sh/uv/).
 
 ```bash
-# Python tests
-uv run pytest
-
-# App development
-cd app/bi-migration-review
-npm install
-npm run dev
-
-# App validation
-npm run typecheck
-npm test
-npm run build
+git clone https://github.com/anhhchu/bi-migration.git && cd bi-migration
+databricks auth login --host https://<workspace-host> --profile my-ws
+python3 scripts/install.py --profile my-ws --catalog <existing-catalog> --dry-run   # preview only
+python3 scripts/install.py --profile my-ws --catalog <existing-catalog>
 ```
 
-The local AppKit development server uses the configured Databricks authentication context. Do not place workspace credentials in the repository.
+`install.py` checks access, picks a SQL warehouse, shows a plan, and asks before creating the schemas and Volumes it needs. It deploys the workflow Jobs (with their Genie Code tasks) and the App, wired together, and prints the App URL. It also deploys the paused dashboard Jobs, which the App still references. Options and permissions: [Installation guide](app/bi-migration-review/docs/INSTALLATION_GUIDE.md).
 
-## Deployment
-
-Deployment uses a configured target in `databricks.yml`. The checked-in `dev` target (development mode) is an example tied to the current workspace and Volume; add or override a target for another environment before deploying.
-
-Authenticate explicitly and verify the target:
+Workspace choices (catalog, schemas, Volumes, warehouse) are saved per CLI profile in `.databricks/bi-migration/<profile>.json` (gitignored), not in `databricks.yml`. To redeploy after code changes:
 
 ```bash
-databricks auth profiles
-databricks bundle validate -t dev --profile DEFAULT
+(cd workflows/datasource-semantic-migration && uv run python deploy.py --profile my-ws --target dev)  # workflow
+python3 scripts/deploy.py --profile my-ws --target dev --component app                             # App
 ```
 
-### 1. Deploy workflow Jobs
+Use these scripts rather than plain `databricks bundle deploy`: they set the Genie Code tasks and the App's Job and Volume bindings.
 
-```bash
-python3 scripts/deploy.py \
-  --profile DEFAULT \
-  --target dev \
-  --component jobs
-```
+## Use
 
-This creates or reconciles the editable **Dashboard Import**, **Semantic Build**, and **Metric View Repair** Jobs. Existing Genie Code task bodies are preserved because the Jobs API redacts them; deterministic notebook tasks and dependencies are updated from the repository.
+1. Put your inputs in a Volume folder, or upload them in the App:
 
-On a new workspace, configure these placeholders once in the Jobs UI using the prompts shown by the App:
+   ```text
+   <input-folder>/
+     datasources/   *.tds, *.tdsx
+     mappings/      table-mapping.yaml   (Tableau tables → Databricks tables; see the Mapping guide)
+   ```
 
-- nested `import_dashboard` task in the Dashboard Import `For each`
-- `build_metric_view`
-- `build_genie_agent`
-- `repair_metric_view` in the Metric View Repair Job
+2. Open the App → **Migrate semantic models** → propose, approve, and review.
 
-The repair workflow validates each revision deterministically and can submit another repair run automatically, stopping after five attempts or when the same failure signature repeats.
-
-### 2. Deploy the bundle and App
-
-```bash
-python3 scripts/deploy.py \
-  --profile DEFAULT \
-  --target dev \
-  --component app
-```
-
-This deploys the Python wheel, inventory Job, notebooks, App source, and App resource bindings using the discovered external Job IDs. It does not modify Genie Code task definitions.
-
-The App also binds the separately deployed datasource semantic workflow. Override its workspace-specific resources when they differ from the development defaults:
-
-```bash
-python3 scripts/deploy.py \
-  --profile DEFAULT \
-  --target dev \
-  --component app \
-  --datasource-semantic-proposal-job-id <propose-job-id> \
-  --datasource-semantic-migration-job-id <migration-job-id> \
-  --datasource-semantic-volume-full-name <catalog.schema.volume>
-```
-
-For a coordinated first deployment, run both phases:
-
-```bash
-python3 scripts/deploy.py --profile DEFAULT --target dev --component all
-```
-
-Preview either phase without changing workspace resources:
-
-```bash
-python3 scripts/deploy.py --profile DEFAULT --target dev --component jobs --dry-run
-python3 scripts/deploy.py --profile DEFAULT --target dev --component app --dry-run
-```
-
-Verify the deployed App:
-
-```bash
-databricks apps get bi-migration-review --profile DEFAULT -o json
-```
-
-## Volume Artifacts
-
-A migration is stored beneath:
+Results are written to the output Volume:
 
 ```text
-/Volumes/<catalog>/<schema>/<volume>/bi-migrations/<migration-name>/
-  inputs/                 # Workbooks and uploaded mapping evidence
-  control/                # Upload and target-metadata manifests
-  inventory/              # Parsed assets, groups, contracts, and readiness
-  groups/<group-slug>/
-    mapping/              # Approved contract and semantic prompts
-    import/               # Reconciled dashboard configs and results
-    semantic/             # Metric View, Agent, audit, remediation, promotion
+<output-volume>/runs/<run-id>--<UTC start>/
+  groups/<group>/metric-view.yaml   # candidate definition
+  reports/                          # HTML and JSON reviews per group
+  _internal/                        # IR, query results, repair evidence
 ```
 
-Internal identifiers such as `group-001` remain inventory metadata; user-facing group packages use concise readable slugs.
+Candidate Metric Views are created as `<catalog>.<schema>.bim_<group>_<hash>_candidate`.
 
-## CLI Pipeline
+## Repository layout
 
-The deterministic backend can also run outside the App:
+- `workflows/datasource-semantic-migration/` — the semantic migration workflow: parser, evaluator, repair, reports, Jobs, and tests.
+- `app/bi-migration-review/` — the Databricks App (AppKit, React).
+- `scripts/install.py`, `scripts/deploy.py` — install and deploy everything.
+- Dashboard migration (paused): `src/bi_migration/`, `notebooks/`, `prompts/`, `schemas/`, `skills/`, `tests/`.
+
+## Development
 
 ```bash
-uv run bi-migrate generate-corpus --output build/test-corpus
-
-uv run bi-migrate backend \
-  --input build/test-corpus/tableau \
-  --mapping-docs build/test-corpus/mappings \
-  --target-metadata build/test-corpus/target_metadata.json \
-  --domain sales \
-  --output build/test-run
+(cd workflows/datasource-semantic-migration && uv run pytest)   # workflow tests
+(cd app/bi-migration-review && npm install && npm test)         # App tests
+(cd app/bi-migration-review && npm run dev)                     # local App, see its README
 ```
 
-Generated mappings are proposals. A reviewer must resolve blocking datasource and relationship gaps before approving the contract or creating semantic assets.
+## Current limits
 
-## Current Boundaries
-
-- Promotion records final naming and approval decisions; execution of the governed Promotion Job is tracked in GitHub issue #1.
-- Existing migration artifacts are group-scoped. Run-scoped artifact history and `latest-success` pointers remain planned hardening work.
-- Genie Code conversation text is not scraped. Actionable findings must be persisted as structured artifacts for review and remediation.
+- Numbers are not yet compared with Tableau (parity), and performance and certification are not automated.
+- Repair can stop early when deliberately excluded items count against its completeness gate.
+- Tableau datasource filter values and some date-shift calculations are not parsed yet; they appear as action items.

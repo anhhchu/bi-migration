@@ -1,120 +1,63 @@
 # Installation guide
 
-Set up the BI Migration App and its Databricks workflow. For how to use the App, open its Home page.
+Install the semantic migration workflow and this App in four steps.
 
-## Prerequisites
+## 1. Install the tools
 
-You need:
-
-- the modern Databricks CLI, version 1.0.0 or newer;
-- `uv`, Python 3.11+, Node.js, and npm;
-- a Databricks workspace with Serverless Lakeflow Jobs and Genie Code tasks;
-- a running SQL warehouse;
-- Unity Catalog schemas and Volumes for inputs, candidates, staging, and workflow artifacts;
-- permission to deploy Jobs and Apps and to create Genie Code automations;
-- `READ_VOLUME`, `WRITE_VOLUME`, `USE CATALOG`, `USE SCHEMA`, object-creation, and mapped-table `SELECT` privileges.
-
-### 1. Install the Databricks CLI
-
-macOS or Linux with Homebrew:
+- [Databricks CLI](https://docs.databricks.com/dev-tools/cli/install.html) 1.0 or newer (not the legacy `databricks-cli` Python package)
+- Python 3.11+ and [uv](https://docs.astral.sh/uv/) (`brew install uv`, or `pip install uv`)
 
 ```bash
-brew tap databricks/tap
-brew install databricks
+brew tap databricks/tap && brew install databricks   # macOS/Linux; Windows: winget install Databricks.DatabricksCLI
 databricks -v
 ```
 
-macOS or Linux without Homebrew:
+Get the code:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/databricks/setup-cli/main/install.sh | sh
-databricks -v
+git clone https://github.com/anhhchu/bi-migration.git
+cd bi-migration
 ```
 
-Windows PowerShell:
-
-```powershell
-winget install Databricks.DatabricksCLI
-databricks -v
-```
-
-Do not install the legacy `databricks-cli` Python package.
-
-### 2. Create an OAuth Profile
+## 2. Sign in
 
 ```bash
-databricks auth login \
-  --host https://<workspace-host> \
-  --profile <profile-name>
-
-databricks auth profiles
-databricks current-user me --profile <profile-name>
+databricks auth login --host https://<workspace-host> --profile my-ws
 ```
 
-Use OAuth, never plaintext credential storage. Pass the selected profile explicitly to every command.
+## 3. Preview
 
-### 3. Configure the Datasource Semantic Workflow
-
-Add a target in `workflows/datasource-semantic-migration/databricks.yml`:
-
-```yaml
-targets:
-  customer-dev:
-    mode: development
-    variables:
-      output_volume_path: /Volumes/<catalog>/<schema>/<volume>
-      candidate_catalog: <catalog>
-      candidate_schema: bi_migration
-      staging_schema: bi_migration_staging
-      warehouse_id: <warehouse-id>
-      analysis_batch_size: 25
-      analysis_batch_workers: 8
-```
-
-The catalog, schemas, Volume, warehouse, and mapped physical tables must already exist.
-
-Deploy the four standalone workflow Jobs:
+From the repository root:
 
 ```bash
-cd workflows/datasource-semantic-migration
-uv sync
-uv run pytest
-uv run python deploy.py \
-  --profile <profile-name> \
-  --target customer-dev
+python3 scripts/install.py --profile my-ws --catalog <existing-catalog> --dry-run
 ```
 
-Use this `deploy.py`; a plain bundle deployment does not restore the native Genie Code tasks.
+This only reads the workspace and prints the plan: warehouse, schemas, Volumes, and what will be created.
 
-### 4. Configure and Deploy the App
-
-Update the selected target in the repository-root `databricks.yml` with the workspace Volume and Job IDs. Then deploy editable dashboard/semantic Jobs and the App:
+## 4. Install
 
 ```bash
-cd <repository-root>
-uv sync
-
-python3 scripts/deploy.py \
-  --profile <profile-name> \
-  --target <target> \
-  --component jobs
-
-python3 scripts/deploy.py \
-  --profile <profile-name> \
-  --target <target> \
-  --component app \
-  --datasource-semantic-proposal-job-id <proposal-job-id> \
-  --datasource-semantic-migration-job-id <migration-job-id> \
-  --datasource-semantic-volume-full-name <catalog.schema.volume>
+python3 scripts/install.py --profile my-ws --catalog <existing-catalog>
 ```
 
-The deploy helper builds the App, binds the Jobs and Volumes, deploys the bundle, and starts the App.
+The script checks your access, picks a SQL warehouse, shows a plan, and asks before creating anything. It then:
 
-Verify it:
+1. Creates, if missing, schema `bi_migration` (candidate Metric Views), `bi_migration_staging`, and Volumes `semantic_workflows` (run artifacts) and `migration_inputs` (uploads).
+2. Deploys the workflow Jobs and their Genie Code tasks.
+3. Deploys the App, connected to those Jobs and Volumes, and prints its URL.
 
-```bash
-databricks apps get bi-migration-review \
-  --profile <profile-name> \
-  -o json
-```
+| Option                                 | Use it to                                   |
+| -------------------------------------- | ------------------------------------------- |
+| `--schema <name>`                      | Use another schema name                     |
+| `--warehouse-id <id>`                  | Choose the SQL warehouse                    |
+| `--upload-volume <catalog.schema.vol>` | Reuse an existing upload Volume             |
+| `--dry-run`                            | See the plan without changing the workspace |
+| `--yes`                                | Skip the confirmation                       |
+| `--configure-only`                     | Record settings for an existing install     |
 
+Your choices are saved per CLI profile (one profile per workspace) in `.databricks/bi-migration/<profile>.json`, which is gitignored. Later deploys read them, so each workspace keeps its own catalog, Volumes, and warehouse. Run the same command again to change them or update the installation.
+
+## Permissions
+
+You need `USE CATALOG` and `CREATE SCHEMA` on the catalog (or existing schemas and Volumes), `SELECT` on the Databricks tables your mapping points to, and permission to create Jobs and Apps. Give App users `READ VOLUME` on the `semantic_workflows` Volume.
