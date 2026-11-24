@@ -70,7 +70,7 @@ resources:
 
   jobs:
     inventory:
-      name: "[${bundle.target}] BI migration inventory"
+      name: "BI migration inventory"
       performance_target: PERFORMANCE_OPTIMIZED
       tags:
         aidevkit_project: ai-dev-kit
@@ -100,8 +100,9 @@ artifacts:
     build: uv build
 
 targets:
-  default:
+  dev:
     default: true
+    mode: development
     variables:
       volume_full_name: main.superstore.tableau
       dashboard_import_job_id: "0"

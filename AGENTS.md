@@ -14,7 +14,7 @@ From the repository root:
 
 - `uv run pytest` runs the Python test suite.
 - `uv run bi-migrate backend ...` runs the production-oriented inventory and mapping pipeline; see `README.md` for arguments.
-- `databricks bundle validate -t default --profile DEFAULT` validates Databricks resources.
+- `databricks bundle validate -t dev --profile DEFAULT` validates Databricks resources.
 
 From `app/bi-migration-review/`:
 
@@ -41,6 +41,8 @@ History is minimal, so use short imperative commit subjects such as `Fix approve
 Always pass `--profile DEFAULT` for workspace CLI commands. Store production workflow inputs and outputs in configured Unity Catalog Volumes; do not embed local filesystem paths in generated manifests or prompts.
 
 Never set `DATABRICKS_AUTH_STORAGE=plaintext` when invoking the Databricks CLI. Use the profile's standard OAuth credential storage and refresh it with `databricks auth login --profile DEFAULT` when required.
+
+Before any expensive Databricks maintenance operation, explain the implementation and expected cost, then wait for user confirmation. This includes UC Volume "renames" that require recursive copy, artifact path rewriting, verification, and deletion because the CLI has no atomic move command. Report the estimated file count and data size before proceeding.
 
 ## Databricks Job Runs
 

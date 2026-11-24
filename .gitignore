@@ -18,3 +18,6 @@ V2_PLAN.md
 docs/BUG_REPORT_MIGRATION_STATE.md
 workflows/datasource-semantic-migration/METRIC-VIEW-EVALUATION-REPAIR-PLAN.md
 workflows/datasource-semantic-migration/datasource-samples/
+
+# Local browser-automation screenshots and snapshots
+.playwright-mcp/

@@ -46,13 +46,13 @@ The local AppKit development server uses the configured Databricks authenticatio
 
 ## Deployment
 
-Deployment uses a configured target in `databricks.yml`. The checked-in `default` target is a development example tied to the current workspace and Volume; add or override a target for another environment before deploying.
+Deployment uses a configured target in `databricks.yml`. The checked-in `dev` target (development mode) is an example tied to the current workspace and Volume; add or override a target for another environment before deploying.
 
 Authenticate explicitly and verify the target:
 
 ```bash
 databricks auth profiles
-databricks bundle validate -t default --profile DEFAULT
+databricks bundle validate -t dev --profile DEFAULT
 ```
 
 ### 1. Deploy workflow Jobs
@@ -60,7 +60,7 @@ databricks bundle validate -t default --profile DEFAULT
 ```bash
 python3 scripts/deploy.py \
   --profile DEFAULT \
-  --target default \
+  --target dev \
   --component jobs
 ```
 
@@ -80,7 +80,7 @@ The repair workflow validates each revision deterministically and can submit ano
 ```bash
 python3 scripts/deploy.py \
   --profile DEFAULT \
-  --target default \
+  --target dev \
   --component app
 ```
 
@@ -91,7 +91,7 @@ The App also binds the separately deployed datasource semantic workflow. Overrid
 ```bash
 python3 scripts/deploy.py \
   --profile DEFAULT \
-  --target default \
+  --target dev \
   --component app \
   --datasource-semantic-proposal-job-id <propose-job-id> \
   --datasource-semantic-migration-job-id <migration-job-id> \
@@ -101,14 +101,14 @@ python3 scripts/deploy.py \
 For a coordinated first deployment, run both phases:
 
 ```bash
-python3 scripts/deploy.py --profile DEFAULT --target default --component all
+python3 scripts/deploy.py --profile DEFAULT --target dev --component all
 ```
 
 Preview either phase without changing workspace resources:
 
 ```bash
-python3 scripts/deploy.py --profile DEFAULT --target default --component jobs --dry-run
-python3 scripts/deploy.py --profile DEFAULT --target default --component app --dry-run
+python3 scripts/deploy.py --profile DEFAULT --target dev --component jobs --dry-run
+python3 scripts/deploy.py --profile DEFAULT --target dev --component app --dry-run
 ```
 
 Verify the deployed App:

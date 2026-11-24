@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import re
 import json
 import subprocess
 from pathlib import Path
@@ -135,7 +136,7 @@ def deploy_job(
 def main() -> None:
     parser = argparse.ArgumentParser(description="Deploy BI migration Jobs, bundle resources, and Databricks App.")
     parser.add_argument("--profile", default="DEFAULT")
-    parser.add_argument("--target", default="default")
+    parser.add_argument("--target", default="dev")
     parser.add_argument("--app-name", default="bi-migration-review")
     parser.add_argument("--component", choices=("all", "jobs", "app"), default="all")
     parser.add_argument("--datasource-semantic-proposal-job-id", default="0")
@@ -150,9 +151,12 @@ def main() -> None:
     current_user = run_json(args.profile, "current-user", "me")["userName"]
     bundle_root = f"/Workspace/Users/{current_user}/.bundle/bi-migration-review/{args.target}/files"
     notebooks = f"{bundle_root}/notebooks"
-    dashboard_name = f"[{args.target}] BI migration dashboard import"
-    semantic_name = f"[{args.target}] BI migration semantic build"
-    repair_name = f"[{args.target}] BI migration metric view repair"
+    # Match the bundle's development-mode prefix so API-managed Jobs sit beside bundle Jobs.
+    short_name = re.sub(r"[^A-Za-z0-9]+", "_", current_user.split("@")[0]).strip("_")
+    name_prefix = f"[dev {short_name}]" if args.target == "dev" else f"[{args.target}]"
+    dashboard_name = f"{name_prefix} BI migration dashboard import"
+    semantic_name = f"{name_prefix} BI migration semantic build"
+    repair_name = f"{name_prefix} BI migration metric view repair"
     dashboard_existing = existing_job(args.profile, dashboard_name)
     semantic_existing = existing_job(args.profile, semantic_name)
     repair_existing = existing_job(args.profile, repair_name)
