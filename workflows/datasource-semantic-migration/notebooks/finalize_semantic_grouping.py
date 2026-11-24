@@ -1,6 +1,5 @@
 # Databricks notebook source
 import json
-from datetime import datetime, timezone
 from pathlib import Path
 
 from datasource_semantic_migration.notebook_results import (
@@ -31,24 +30,12 @@ review = build_grouping_review(
     excluded_helpers=groups_index.get("ungrouped_datasources", []),
     migration_job_id=migration_job_id,
     migration_job_url=migration_job_url,
+    run_folder=Path(manifest["runtime"]["run_root"]).name,
 )
 reports_path = Path(manifest["runtime"]["reports_path"])
 review_path = write_json_artifact(review, reports_path / "semantic-grouping-review.json")
 review_html_path = reports_path / "semantic-grouping-review.html"
 review_html_path.write_text(render_grouping_review_html(review), encoding="utf-8")
-output_volume_path = Path(manifest["runtime"]["run_root"]).parents[1]
-pending_proposal_path = output_volume_path / "_control" / "latest-pending-proposal.json"
-pending_proposal = {
-    "schema_version": "1.0",
-    "status": "PENDING_APPROVAL",
-    "workflow_run_id": manifest["workflow_run_id"],
-    "created_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-    "groups_index_path": groups_index_path.as_posix(),
-    "grouping_review_path": review_path.as_posix(),
-    "grouping_review_html_path": review_html_path.as_posix(),
-    "semantic_groups": [group["group_name"] for group in group_summaries],
-}
-write_json_artifact(pending_proposal, pending_proposal_path)
 manifest["status"] = "GROUPING_REVIEW_REQUIRED"
 manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
@@ -62,10 +49,13 @@ result = {
     "next_step": review["next_step"],
     "migration_job_id": review["migration_job_id"],
     "migration_job_url": migration_job_url,
-    "migration_handoff": "The migration Job will resolve this proposal automatically.",
+    "proposal_run_id": review["handoff"]["proposal_run_id"],
+    "proposal_run_folder": review["handoff"]["run_folder"],
+    "migration_command": review["handoff"]["cli_command"],
 }
 print("\n=== Finalize Semantic Grouping ===")
-print(f"Open migration Job: {migration_job_url}")
+print(f"Approve this proposal: start {migration_job_url} with proposal_run_id={review['handoff']['proposal_run_id']}")
+print(f"CLI: {review['handoff']['cli_command']}")
 print(format_notebook_result(result))
 displayHTML(render_grouping_review_html(review))
 displayHTML(render_volume_links_html(result))

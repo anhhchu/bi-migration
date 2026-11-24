@@ -22,6 +22,9 @@ from datasource_semantic_migration.reporting import (
 )
 from datasource_semantic_migration.tableau_parser import write_json_artifact
 
+# Used for Catalog Explorer links in the HTML reports.
+WORKSPACE_URL = "https://" + spark.conf.get("spark.databricks.workspaceUrl").removeprefix("https://").rstrip("/")
+
 
 for widget_name in (
     "group_path",
@@ -219,15 +222,25 @@ run_root = group_path.parents[1]
 report_path = Path(manifest.get("report_path") or run_root / "reports" / "groups" / manifest["group_id"])
 group_info = {
     "group_id": manifest["group_id"],
+    "display_name": manifest.get("display_name") or manifest.get("group_name"),
     "group_path": str(group_path),
     "internal_path": str(group_internal_path),
     "report_path": str(report_path),
     "source_summary_path": str(group_internal_path / "source-summary.json"),
 }
-group_review = build_group_review(group=group_info, final_result=final_result, evaluation=group_evaluation)
+group_mapping_path = group_path / "mapping.yaml"
+group_review = build_group_review(
+    group=group_info,
+    final_result=final_result,
+    evaluation=group_evaluation,
+    # metric-view.yaml was rewritten above when the candidate changed, so it is the deployed definition.
+    metric_view=yaml.safe_load((group_path / "metric-view.yaml").read_text(encoding="utf-8")),
+    scorecard_evaluation=evaluation,
+    group_mapping=yaml.safe_load(group_mapping_path.read_text(encoding="utf-8")) if group_mapping_path.is_file() else None,
+)
 write_json_artifact(group_review, report_path / "migration-review.json")
 (report_path / "migration-review.html").write_text(
-    render_workflow_html(build_workflow_review(workflow_run_id=manifest["workflow_run_id"], groups=[group_review])),
+    render_workflow_html({"workspace_url": WORKSPACE_URL, **build_workflow_review(workflow_run_id=manifest["workflow_run_id"], groups=[group_review])}),
     encoding="utf-8",
 )
 repair_review = build_repair_review(summary=summary, evaluation=evaluation)
@@ -243,7 +256,7 @@ workflow_review = build_workflow_review(
     groups=available_group_reviews or [group_review],
 )
 write_json_artifact(workflow_review, reports_root / "index.json")
-(reports_root / "index.html").write_text(render_workflow_html(workflow_review), encoding="utf-8")
+(reports_root / "index.html").write_text(render_workflow_html({"workspace_url": WORKSPACE_URL, **workflow_review}), encoding="utf-8")
 print("\n=== Deploy, Retest, Finalize ===")
 print(format_notebook_result(summary))
 displayHTML(render_volume_links_html(summary))

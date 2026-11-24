@@ -1,7 +1,13 @@
 from __future__ import annotations
 
 from html import escape
+import re
 from typing import Any
+
+from .action_items import build_action_groups, entry_names, plain_language, reconcile_import_exclusions
+from .gate import build_gate
+from .report_html import render_workflow_html  # noqa: F401  (re-exported for notebooks)
+from .proposal_handoff import build_handoff
 
 
 def build_grouping_review(
@@ -13,7 +19,14 @@ def build_grouping_review(
     excluded_helpers: list[dict[str, Any]],
     migration_job_id: str | None = None,
     migration_job_url: str | None = None,
+    run_folder: str | None = None,
 ) -> dict[str, Any]:
+    handoff = build_handoff(
+        workflow_run_id=workflow_run_id,
+        run_folder=run_folder or workflow_run_id,
+        migration_job_id=migration_job_id,
+        migration_job_url=migration_job_url,
+    )
     return {
         "schema_version": "1.0",
         "workflow_run_id": workflow_run_id,
@@ -27,9 +40,10 @@ def build_grouping_review(
         "excluded_helpers": excluded_helpers,
         "migration_job_id": migration_job_id,
         "migration_job_url": migration_job_url,
+        "handoff": handoff,
         "next_step": (
-            "After confirming memberships, targets, and group names, open the separate migration Job "
-            "and select Run now. It automatically uses the latest pending proposal."
+            "After confirming memberships, targets, and group names, start the migration Job with "
+            f"proposal_run_id={workflow_run_id} so it migrates exactly this proposal."
         ),
     }
 
@@ -64,6 +78,24 @@ def render_grouping_review_html(review: dict[str, Any]) -> str:
         if migration_job_url
         else ""
     )
+    handoff = review.get("handoff") or build_handoff(
+        workflow_run_id=review["workflow_run_id"],
+        run_folder=review["workflow_run_id"],
+        migration_job_id=migration_job_id,
+        migration_job_url=migration_job_url,
+    )
+    ui_steps = "".join(f"<li>{escape(step)}</li>" for step in handoff["jobs_ui_steps"])
+    handoff_html = (
+        "<div class='next'><strong>Approve this proposal</strong>"
+        "<p>Confirm the group membership and target tables below, then start the migration Job for this exact run.</p>"
+        f"<p class='run-id'>proposal_run_id <code>{escape(handoff['proposal_run_id'])}</code>"
+        f"<span>Run folder <code>{escape(handoff['run_folder'])}</code></span></p>"
+        f"<h3>In the Jobs UI</h3><ol>{ui_steps}</ol>"
+        f"<h3>From the Databricks CLI</h3><pre>{escape(handoff['cli_command'])}</pre>"
+        f"<p class='muted'>{escape(handoff['automatic_resolution'])} "
+        "Each proposal can be migrated once; use force_rerun=true only to migrate it again deliberately.</p>"
+        f"{migration_link}</div>"
+    )
     return (
         "<!doctype html><html><head><meta charset='utf-8'><title>Semantic grouping review</title>"
         "<style>body{font:14px system-ui;margin:0;background:#f5f6f7;color:#0b2026}main{max-width:1100px;margin:auto;padding:32px}"
@@ -71,14 +103,13 @@ def render_grouping_review_html(review: dict[str, Any]) -> str:
         "section{background:white;border:1px solid #dce0e2;border-radius:8px;padding:20px;margin-top:18px}.section-head{display:flex;justify-content:space-between;gap:24px}"
         ".badge{font-weight:700;color:#b52815}table{border-collapse:collapse;width:100%}th,td{border-bottom:1px solid #e7e9ea;padding:9px;text-align:left;vertical-align:top}"
         "th{background:#f7f8f9}code{overflow-wrap:anywhere}.next{border-left:4px solid #ff3621;padding:16px;background:white;margin:24px 0}"
-        ".button{display:inline-block;margin-top:12px;padding:9px 14px;border-radius:4px;background:#ff3621;color:white;text-decoration:none;font-weight:700}</style>"
+        ".button{display:inline-block;margin-top:12px;padding:9px 14px;border-radius:4px;background:#ff3621;color:white;text-decoration:none;font-weight:700}"
+        ".run-id{font-size:16px}.run-id code{font-size:18px;font-weight:700}.run-id span{margin-left:18px;color:#5d6b70;font-size:13px}"
+        "pre{background:#0b2026;color:white;padding:12px;border-radius:4px;overflow-x:auto;white-space:pre-wrap;word-break:break-all}"
+        ".muted{color:#5d6b70}</style>"
         "</head><body><main>"
         f"<p class='eyebrow'>Workflow {escape(review['workflow_run_id'])}</p><h1>Review semantic groups</h1>"
-        f"<p>{escape(review['headline'])}</p><div class='next'><strong>Next step</strong><p>{escape(review['next_step'])}</p>"
-        "<ol><li>Confirm the group membership and target tables below.</li><li>Open the migration Job.</li>"
-        "<li>Select <strong>Run now</strong>. No path is required.</li></ol>"
-        "<p>To migrate an older proposal, use <strong>Run now with different parameters</strong> and enter its proposal run ID.</p>"
-        f"{migration_link}</div>{''.join(sections)}"
+        f"<p>{escape(review['headline'])}</p>{handoff_html}{''.join(sections)}"
         f"<section><h2>Excluded UI helpers</h2><table><thead><tr><th>Datasource ID</th><th>Reason</th></tr>"
         f"</thead><tbody>{helper_rows}</tbody></table></section></main></body></html>\n"
     )
@@ -104,8 +135,16 @@ def build_group_review(
     group: dict[str, Any],
     final_result: dict[str, Any],
     evaluation: dict[str, Any],
+    metric_view: dict[str, Any] | None = None,
+    scorecard_evaluation: dict[str, Any] | None = None,
+    group_mapping: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     agent_result = evaluation.get("agent_result") or {}
+    measure_expressions = {
+        str(item.get("name")): str(item.get("expr", "")).strip()
+        for item in (metric_view or {}).get("measures", [])
+        if item.get("name")
+    }
     dimensions = agent_result.get("dimensions_created", [])
     measures = agent_result.get("measures_created", [])
     parameters = agent_result.get("parameters_created", [])
@@ -161,16 +200,34 @@ def build_group_review(
             if item.get("code") == "AGGREGATION_REQUIRES_COMPILATION"
         }
     )
-    if aggregation_items:
-        actions.append(
-            _action(
-                "confirm_aggregations",
-                "REVIEW",
-                "Confirm inferred aggregations",
-                "The candidate uses an inferred aggregate for each row-level Tableau calculation. Confirm SUM or update the mapping with the intended aggregation.",
-                aggregation_items,
-            )
+    # Measures built from other measures (MEASURE(...)) inherit their aggregation; only raw ones need a check.
+    aggregation_items = [
+        name for name in aggregation_items if "MEASURE(" not in measure_expressions.get(name, "").upper()
+    ]
+    # SUM is Tableau's default for numeric measures, so only other aggregations need a person.
+    aggregations_needing_review = [
+        name for name in aggregation_items if not re.match(r"^\s*SUM\s*\(", measure_expressions.get(name, ""), re.IGNORECASE)
+    ]
+    if aggregations_needing_review:
+        aggregation_action = _action(
+            "confirm_aggregations",
+            "REVIEW",
+            "Check how these measures are totalled",
+            "In Tableau these formulas are calculated per row, and each worksheet decides how to total them. "
+            "A Metric View must fix one way to total each measure, so the workflow chose one (shown below). "
+            "If a choice matches how your reports total the field, no action is needed.",
+            aggregations_needing_review,
         )
+        aggregation_action["details"] = [
+            {"name": name, "expression": measure_expressions.get(name) or "Expression not recorded"}
+            for name in aggregations_needing_review
+        ]
+        aggregation_action["how_to_fix"] = (
+            f"To change one, edit that measure's expr in {group['group_path']}/metric-view.yaml "
+            "(for example SUM to AVG), then run the Datasource semantic repair Job with "
+            f"group_path={group['group_path']}. Repair redeploys the Metric View and re-checks it."
+        )
+        actions.append(aggregation_action)
     if approximations:
         actions.append(
             _action(
@@ -181,29 +238,49 @@ def build_group_review(
                 [item.get("name", "Unnamed approximation") for item in approximations],
             )
         )
-    if repair.get("status") == "READY":
-        readiness = "READY"
-    elif repair.get("status") in {
-        "BLOCKED_EVIDENCE",
-        "UNRESOLVABLE_AUTOMATICALLY",
-        "REGRESSION_REJECTED",
-        "EXHAUSTED",
-        "NO_PROGRESS",
-        "GENIE_OUTPUT_MISSING",
-    }:
-        readiness = "BLOCKED"
-    else:
-        readiness = "BLOCKED" if blocking_findings or business_untranslated else "NEEDS_REVIEW" if actions else "READY"
-    headline = (
-        f"Candidate created with {len(blocking_findings)} blocking gap(s) and {len(actions)} action(s)."
-        if final_result.get("metric_view_fqn")
-        else "No candidate Metric View was created."
+    # Measures the import left out on purpose (with a reason) are not missing-measure failures.
+    scorecard_evaluation = reconcile_import_exclusions(scorecard_evaluation, business_untranslated)
+    action_groups = build_action_groups(
+        scorecard_evaluation=scorecard_evaluation,
+        evaluation_findings=findings,
+        business_untranslated=business_untranslated,
+        approximations=approximations,
+        aggregation_items=[
+            {"name": name, "expression": measure_expressions.get(name, "")}
+            for name in aggregation_items
+        ],
+        group_mapping=group_mapping,
+        repair=repair,
+        has_candidate=bool(final_result.get("metric_view_fqn")),
     )
+    # Dashboard-only items are not part of the model, so they do not lower semantic coverage.
+    human_untranslated = action_groups.pop("_needs_people")
+    semantic_item_count = translated_count + len(human_untranslated)
+    coverage_percent = round(100 * translated_count / semantic_item_count, 1) if semantic_item_count else 0.0
+    gate = build_gate(
+        has_candidate=bool(final_result.get("metric_view_fqn")),
+        repair=repair,
+        scorecard_evaluation=scorecard_evaluation,
+        metric_view=metric_view,
+        group_mapping=group_mapping,
+        untranslated=human_untranslated,
+        review_actions=[
+            {"priority": "BLOCKING" if action_group["blocking"] else "REVIEW", "title": action_group["label"]}
+            for action_group in action_groups["groups"]
+            # Business decisions are reported under Translation; Design covers expressions, data, and access.
+            if action_group["category"] in {"calculation", "access_platform", "data_mapping"}
+        ],
+    )
+    readiness = {"BLOCKED": "BLOCKED", "NEEDS_REVIEW": "NEEDS_REVIEW", "CHECKS_PENDING": "NEEDS_REVIEW"}.get(
+        gate["status"], "READY"
+    )
+    headline = gate["headline"]
     group_path = group["group_path"]
     internal_path = group.get("internal_path") or f"{group_path}/_internal"
     report_path = group.get("report_path")
     return {
         "group_id": group["group_id"],
+        "display_name": group.get("display_name"),
         "status": final_result["status"],
         "readiness": readiness,
         "headline": headline,
@@ -217,7 +294,7 @@ def build_group_review(
             "dimensions_created": len(dimensions),
             "measures_created": len(measures),
             "parameters_created": len(parameters),
-            "business_items_not_translated": len(business_untranslated),
+            "business_items_not_translated": len(human_untranslated),
             "technical_items_excluded": len(technical_exclusions),
             "dimension_names": dimensions,
             "measure_names": measures,
@@ -230,6 +307,8 @@ def build_group_review(
         "technical_exclusions": technical_exclusions,
         "approximations": approximations,
         "recommended_actions": actions,
+        "gate": gate,
+        "action_groups": action_groups,
         "notes": agent_result.get("notes", []),
         "repair": repair,
         "report_path": report_path,
@@ -275,71 +354,16 @@ def build_workflow_review(*, workflow_run_id: str, groups: list[dict[str, Any]])
                 group["coverage"]["business_items_not_translated"] for group in groups
             ),
             "approximations": sum(len(group["approximations"]) for group in groups),
-            "actions": len(actions),
+            "actions": sum(
+                group["action_groups"]["blocking_count"] + group["action_groups"]["review_count"]
+                if group.get("action_groups")
+                else len(group["recommended_actions"])
+                for group in groups
+            ),
         },
         "recommended_actions": actions,
         "groups": groups,
     }
-
-
-def render_workflow_html(review: dict[str, Any]) -> str:
-    cards = "".join(
-        f"<div class='card'><span>{escape(label)}</span><strong>{value}</strong></div>"
-        for label, value in (
-            ("Semantic groups", review["totals"]["semantic_groups"]),
-            ("Ready", review["totals"]["ready"]),
-            ("Blocked", review["totals"]["blocked"]),
-            ("Actions", review["totals"]["actions"]),
-        )
-    )
-    sections = []
-    for group in review["groups"]:
-        actions = "".join(
-            "<li>"
-            f"<strong>{escape(action['priority'])}: {escape(action['title'])}</strong>"
-            f"<p>{escape(action['description'])}</p>"
-            f"<small>{escape(', '.join(action['items']))}</small>"
-            "</li>"
-            for action in group["recommended_actions"]
-        ) or "<li>No remediation required.</li>"
-        gaps = "".join(
-            f"<tr><td>{escape(item.get('name', '—'))}</td><td>{escape(item.get('reason', '—'))}</td></tr>"
-            for item in group["items_not_translated"]
-        ) or "<tr><td colspan='2'>No business items omitted.</td></tr>"
-        approximations = "".join(
-            f"<tr><td>{escape(item.get('name', '—'))}</td><td>{escape(item.get('detail', '—'))}</td></tr>"
-            for item in group["approximations"]
-        ) or "<tr><td colspan='2'>No approximations recorded.</td></tr>"
-        validation = "".join(
-            f"<tr><td>{escape(str(name))}</td><td>{escape(str(value))}</td></tr>"
-            for name, value in group["validation"].items()
-        ) or "<tr><td colspan='2'>No validation evidence recorded.</td></tr>"
-        candidate = group["candidate"]["metric_view_fqn"] or "Not created"
-        coverage = group["coverage"]
-        sections.append(
-            f"<section><div class='section-head'><div><p class='eyebrow'>{escape(group['group_id'])}</p>"
-            f"<h2>{escape(group['headline'])}</h2></div><span class='badge'>{escape(group['readiness'])}</span></div>"
-            f"<p><strong>Candidate:</strong> <code>{escape(candidate)}</code></p>"
-            f"<p><strong>Semantic coverage:</strong> {coverage['semantic_coverage_percent']}% — "
-            f"{coverage['dimensions_created']} dimensions, {coverage['measures_created']} measures, "
-            f"{coverage['business_items_not_translated']} business item(s) omitted.</p>"
-            f"<h3>Next actions</h3><ol>{actions}</ol>"
-            f"<h3>Untranslated business items</h3><table><thead><tr><th>Item</th><th>Reason</th></tr></thead><tbody>{gaps}</tbody></table>"
-            f"<h3>Approximations</h3><table><thead><tr><th>Item</th><th>Translation</th></tr></thead><tbody>{approximations}</tbody></table>"
-            f"<h3>Validation evidence</h3><table><thead><tr><th>Check</th><th>Result</th></tr></thead><tbody>{validation}</tbody></table>"
-            "</section>"
-        )
-    return (
-        "<!doctype html><html><head><meta charset='utf-8'><title>Datasource semantic migration review</title>"
-        "<style>body{font:14px system-ui;margin:0;background:#f5f6f7;color:#0b2026}main{max-width:1100px;margin:auto;padding:32px}"
-        "h1{font-size:30px;margin:4px 0}h2{font-size:20px;margin:4px 0}h3{margin-top:28px}.eyebrow{color:#5d6b70;text-transform:uppercase;font-weight:700;letter-spacing:.08em}"
-        ".cards{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin:24px 0}.card,section{background:white;border:1px solid #dce0e2;border-radius:8px;padding:20px}"
-        ".card span{display:block;color:#5d6b70}.card strong{font-size:26px}.section-head{display:flex;justify-content:space-between;gap:24px}.badge{font-weight:700;color:#b52815}"
-        "section{margin-top:18px}table{border-collapse:collapse;width:100%}th,td{border-bottom:1px solid #e7e9ea;padding:9px;text-align:left;vertical-align:top}th{background:#f7f8f9}"
-        "li{margin:12px 0}li p{margin:4px 0}small{color:#5d6b70}code{overflow-wrap:anywhere}</style></head><body><main>"
-        f"<p class='eyebrow'>Workflow {escape(review['workflow_run_id'])}</p><h1>Semantic migration review</h1>"
-        f"<p>{escape(review['headline'])}</p><div class='cards'>{cards}</div>{''.join(sections)}</main></body></html>\n"
-    )
 
 
 METRIC_STATUS_GUIDE = {
@@ -371,28 +395,47 @@ METRIC_STATUS_GUIDE = {
 
 FAILURE_CODE_GUIDE = {
     "MISSING_TARGET_MEASURE": {
-        "meaning": "A Tableau business measure has no matching measure in the candidate Metric View.",
-        "action": "Create the target measure or document a governed exclusion.",
+        "meaning": "This Tableau measure has no matching measure in the Metric View.",
+        "action": (
+            "Automatic repair asks Genie to add it. If it is still missing, add the measure to "
+            "groups/<group>/metric-view.yaml and run the Datasource semantic repair Job, or accept it as not migrated."
+        ),
     },
     "NEEDS_SEMANTIC_TRANSLATION": {
-        "meaning": "The deterministic compiler cannot safely translate the Tableau formula.",
-        "action": "Use the structured Genie semantic patch, then rerun deterministic validation.",
+        "meaning": "The formula could not be translated by rule, so it needs Genie or a person to translate it.",
+        "action": (
+            "Automatic repair tries Genie first. If that fails, write the equivalent SQL expression in "
+            "groups/<group>/metric-view.yaml and run the Datasource semantic repair Job."
+        ),
     },
     "AGGREGATION_MISMATCH": {
-        "meaning": "Tableau requires an aggregate, but the target expression is row-level or lacks a recognized aggregate.",
-        "action": "Apply the source-supported aggregate and rerun the measure query.",
+        "meaning": (
+            "Tableau calculates this formula per row, so the Metric View must say how to total it "
+            "(SUM, AVG, COUNT, or built from other measures with MEASURE()). The generated expression does neither."
+        ),
+        "action": (
+            "Wrap the expression in the aggregate your reports use, e.g. SUM(<expression>), in "
+            "groups/<group>/metric-view.yaml, then run the Datasource semantic repair Job."
+        ),
     },
     "MEASURE_QUERY_FAILED": {
-        "meaning": "The generated Metric View measure query returned an engine error.",
-        "action": "Inspect the recorded SQL and error, repair the expression or source, and rerun.",
+        "meaning": "Running SELECT MEASURE(...) on the Metric View returned an error; the error text is shown with it.",
+        "action": (
+            "Common causes: a column renamed or missing in the mapped table, no SELECT permission on the table, "
+            "or a type mismatch. Fix the table or mapping (then propose again), or fix the expression in "
+            "groups/<group>/metric-view.yaml and run the Datasource semantic repair Job."
+        ),
     },
     "EXTERNAL_DATASOURCE_UNMAPPED": {
-        "meaning": "The source calculation references an external datasource absent from the approved mapping.",
-        "action": "Add the approved datasource mapping or explicitly exclude the calculation.",
+        "meaning": "The calculation uses a field from another Tableau datasource that table-mapping.yaml does not map.",
+        "action": "Add that datasource's tables to table-mapping.yaml, then run Propose semantic groups again.",
     },
     "UNSUPPORTED_METRIC_SHAPE": {
-        "meaning": "The calculation shape cannot be represented safely as a Metric View measure.",
-        "action": "Route it to a governed function or record an approved exclusion.",
+        "meaning": (
+            "The calculation uses a Tableau feature with no Metric View equivalent, such as a table calculation "
+            "(INDEX, RUNNING_SUM) that depends on the worksheet layout."
+        ),
+        "action": "No fix in the Metric View. Rebuild it in the dashboard or a SQL view, or accept it as not migrated.",
     },
 }
 

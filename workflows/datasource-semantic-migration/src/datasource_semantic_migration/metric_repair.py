@@ -9,7 +9,12 @@ from typing import Any
 import yaml
 
 
-AGGREGATE_PATTERN = re.compile(r"\b(SUM|AVG|COUNT|MIN|MAX|MEDIAN|PERCENTILE)\s*\(", re.IGNORECASE)
+# MEASURE() composes already-aggregated measures, so it satisfies Tableau's aggregation requirement.
+AGGREGATE_PATTERN = re.compile(
+    r"\b(MEASURE|SUM|AVG|MEAN|COUNT|COUNT_IF|APPROX_COUNT_DISTINCT|MIN|MAX|MEDIAN|MODE|PERCENTILE\w*"
+    r"|STDDEV\w*|VARIANCE|VAR_POP|VAR_SAMP|ANY_VALUE|FIRST|LAST|MIN_BY|MAX_BY|BOOL_AND|BOOL_OR)\s*\(",
+    re.IGNORECASE,
+)
 FQN_PATTERN = re.compile(r"(?<![A-Za-z0-9_])(?:`([^`]+)`|([A-Za-z_][\w-]*))\."
                          r"(?:`([^`]+)`|([A-Za-z_][\w-]*))\."
                          r"(?:`([^`]+)`|([A-Za-z_][\w-]*))")

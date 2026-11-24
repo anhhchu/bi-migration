@@ -133,3 +133,32 @@ def test_lineage_and_create_sql_are_catalog_safe():
     assert target_lineage(document) == ["main.gold.customers", "main.gold.orders"]
     sql = create_metric_view_sql("main.metrics.sales", document)
     assert sql.startswith("CREATE OR REPLACE VIEW `main`.`metrics`.`sales` WITH METRICS LANGUAGE YAML AS $$")
+
+
+def test_measures_composed_from_other_measures_count_as_aggregated():
+    # Regression: Card Payment Transactions run flagged these correct translations as AGGREGATION_MISMATCH.
+    names = ["% MOM Value Color", "Select Current Measure", "Approved Count"]
+    target = {
+        "measures": [
+            {"name": "% MOM Value", "expr": "SUM(value)"},
+            {
+                "name": "% MOM Value Color",
+                "expr": "CASE WHEN MEASURE(`% MOM Value`) > 0 THEN 'Increase' ELSE 'Decline' END",
+            },
+            {
+                "name": "Select Current Measure",
+                "expr": "CASE WHEN select_measure = 'Value' THEN MEASURE(`Current Value`) ELSE MEASURE(`Current Volume`) END",
+            },
+            {"name": "Approved Count", "expr": "COUNT_IF(status = 'APPROVED')"},
+        ]
+    }
+    evaluation = evaluate_candidate(
+        source_metric_irs=[
+            {"measures": [measure(name, status="NEEDS_AGGREGATION_COMPILATION") for name in names]}
+        ],
+        metric_view=target,
+        target_profile={"relationships": []},
+    )
+
+    statuses = {item["source_name"]: item["status"] for item in evaluation["scorecards"]}
+    assert all(statuses[name] == "PASS_SEMANTIC_ONLY" for name in names), statuses

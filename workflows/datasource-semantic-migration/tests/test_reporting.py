@@ -41,8 +41,11 @@ def test_grouping_review_renders_membership_targets_and_approval_handoff():
     assert "Open migration Job" in html
     assert "Navigation only" in html
     assert "href='https://workspace.example/jobs/456'" in html
-    assert "Select <strong>Run now</strong>" in html
-    assert "No path is required" in html
+    assert review["handoff"]["proposal_run_id"] == "123"
+    assert "proposal_run_id <code>123</code>" in html
+    assert "Run now with different parameters" in html
+    assert "databricks jobs run-now 456" in html
+    assert "force_rerun=true" in html
 
 
 def test_workflow_review_surfaces_actions_and_translation_evidence():
@@ -197,6 +200,63 @@ def test_repair_review_explains_gate_math_query_skip_and_repair_action():
     assert review["coverage_gates"][0]["after_formula"] == "6/10"
     assert review["coverage_gates"][0]["gap_count"] == 4
     assert review["query_execution"]["not_applicable_metrics"] == ["Profit Ratio"]
-    assert review["blocking_findings"][0]["recommended_action"].startswith("Create the target measure")
+    assert review["blocking_findings"][0]["recommended_action"].startswith("Automatic repair asks Genie to add it")
     assert "No target measure exists" in html
     assert "NO_MEASURABLE_PROGRESS" in html
+
+
+def test_default_sum_aggregation_is_handled_automatically():
+    group = {
+        "group_id": "cards",
+        "group_path": "/Volumes/main/bi/runs/1/groups/cards",
+        "source_summary_path": "/Volumes/main/bi/runs/1/groups/cards/_internal/source-summary.json",
+    }
+    evaluation = {
+        "agent_result": {"measures_created": ["Current Value", "% MOM Value Color"]},
+        "findings": [
+            {"code": "AGGREGATION_REQUIRES_COMPILATION", "severity": "WARNING", "calculation_name": name}
+            for name in ("Current Value", "% MOM Value Color")
+        ],
+    }
+    metric_view = {
+        "measures": [
+            {"name": "Current Value", "expr": "SUM(trxn_amount_major) FILTER (WHERE `Current Period T/F`)"},
+            {"name": "% MOM Value Color", "expr": "CASE WHEN MEASURE(`% MOM Value`) > 0 THEN 'Up' END"},
+        ]
+    }
+    review = build_group_review(
+        group=group,
+        final_result={"status": "PARTIAL", "metric_view_fqn": "main.bi.cards"},
+        evaluation=evaluation,
+        metric_view=metric_view,
+    )
+    html = render_workflow_html(build_workflow_review(workflow_run_id="1", groups=[review]))
+    automatic = {name: item["detail"] for item in review["action_groups"]["automatic"] for name in item["names"]}
+
+    # SUM matches Tableau's default; the MEASURE()-based label inherits its aggregation. Neither needs a person.
+    assert not any(item["action_id"] == "confirm_aggregations" for item in review["recommended_actions"])
+    assert "Aggregated explicitly" in automatic["Current Value"]
+    assert "% MOM Value Color" not in automatic
+    assert "Handled automatically" in html and "Why a person is needed" in html
+    assert review["gate"]["stages"][3]["key"] == "parity"
+    # Reading order: next step, stage strip, action items, then collapsed evidence.
+    assert html.index("class='next") < html.index("class='stages'") < html.index("<h3>Action items</h3>")
+    assert html.index("<h3>Action items</h3>") < html.index("Stage evidence")
+    assert "Not run" in html
+
+
+def test_report_links_the_metric_view_to_catalog_explorer():
+    from datasource_semantic_migration.report_html import catalog_explorer_url
+
+    assert (
+        catalog_explorer_url("https://w.example/", "main.bi_migration.bim_sales_candidate")
+        == "https://w.example/explore/data/main/bi_migration/bim_sales_candidate"
+    )
+    assert catalog_explorer_url(None, "main.bi.x") is None
+    review = build_group_review(
+        group={"group_id": "sales", "group_path": "/Volumes/main/bi/runs/1/groups/sales"},
+        final_result={"status": "PARTIAL", "metric_view_fqn": "main.bi.bim_sales_candidate"},
+        evaluation={"agent_result": {}, "findings": []},
+    )
+    html = render_workflow_html({"workspace_url": "https://w.example", **build_workflow_review(workflow_run_id="1", groups=[review])})
+    assert "href='https://w.example/explore/data/main/bi/bim_sales_candidate'" in html

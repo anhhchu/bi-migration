@@ -4,9 +4,14 @@ import shutil
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import yaml
+
 from datasource_semantic_migration.notebook_results import format_notebook_result, render_volume_links_html
 from datasource_semantic_migration.reporting import build_group_review, build_workflow_review, render_workflow_html
 from datasource_semantic_migration.tableau_parser import write_json_artifact
+
+# Used for Catalog Explorer links in the HTML reports.
+WORKSPACE_URL = "https://" + spark.conf.get("spark.databricks.workspaceUrl").removeprefix("https://").rstrip("/")
 
 
 for widget_name in ("manifest_path", "groups_index_path"):
@@ -45,11 +50,27 @@ for group in groups_index["groups"]:
                 }
             ],
         }
-    review = build_group_review(group=group, final_result=final_result, evaluation=evaluation)
+    metric_view_path = group_path / "metric-view.yaml"
+    metric_view = yaml.safe_load(metric_view_path.read_text(encoding="utf-8")) if metric_view_path.is_file() else None
+    group_mapping_path = group_path / "mapping.yaml"
+    group_mapping = yaml.safe_load(group_mapping_path.read_text(encoding="utf-8")) if group_mapping_path.is_file() else None
+    # Latest per-measure scorecards from repair, if repair ran.
+    scorecard_evaluation = None
+    repair_attempt_dir = (evaluation.get("repair") or {}).get("attempt_dir")
+    if repair_attempt_dir and (Path(repair_attempt_dir) / "evaluation-after.json").is_file():
+        scorecard_evaluation = json.loads((Path(repair_attempt_dir) / "evaluation-after.json").read_text(encoding="utf-8"))
+    review = build_group_review(
+        group=group,
+        final_result=final_result,
+        evaluation=evaluation,
+        metric_view=metric_view or None,
+        scorecard_evaluation=scorecard_evaluation,
+        group_mapping=group_mapping or None,
+    )
     group_reviews.append(review)
     write_json_artifact(review, group_report_path / "migration-review.json")
     (group_report_path / "migration-review.html").write_text(
-        render_workflow_html(build_workflow_review(workflow_run_id=manifest["workflow_run_id"], groups=[review])),
+        render_workflow_html({"workspace_url": WORKSPACE_URL, **build_workflow_review(workflow_run_id=manifest["workflow_run_id"], groups=[review])}),
         encoding="utf-8",
     )
 
@@ -57,7 +78,7 @@ summary = build_workflow_review(workflow_run_id=manifest["workflow_run_id"], gro
 reports_path = Path(manifest["runtime"]["reports_path"])
 summary_path = write_json_artifact(summary, reports_path / "index.json")
 html_path = reports_path / "index.html"
-html_path.write_text(render_workflow_html(summary), encoding="utf-8")
+html_path.write_text(render_workflow_html({"workspace_url": WORKSPACE_URL, **summary}), encoding="utf-8")
 manifest["status"] = summary["status"]
 manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
