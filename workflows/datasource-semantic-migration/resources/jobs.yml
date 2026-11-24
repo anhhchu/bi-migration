@@ -1,7 +1,7 @@
 resources:
   jobs:
     datasource_semantic_orchestrator:
-      name: '[${bundle.target}] Propose semantic groups'
+      name: 'Propose semantic groups'
       performance_target: PERFORMANCE_OPTIMIZED
       tags:
         aidevkit_project: bi-migration-blueprint
@@ -17,6 +17,7 @@ resources:
               input_volume_path: '{{job.parameters.input_volume_path}}'
               workflow_run_id: '{{job.run_id}}'
               job_run_id: '{{job.run_id}}'
+              job_start_time: '{{job.start_time.iso_datetime}}'
               output_volume_path: ${var.output_volume_path}
               candidate_catalog: ${var.candidate_catalog}
               candidate_schema: ${var.candidate_schema}
@@ -94,7 +95,7 @@ resources:
               - PyYAML==6.0.3
 
     datasource_semantic_migration:
-      name: '[${bundle.target}] Migrate approved semantic groups'
+      name: 'Migrate approved semantic groups'
       performance_target: PERFORMANCE_OPTIMIZED
       tags:
         aidevkit_project: bi-migration-blueprint
@@ -104,6 +105,8 @@ resources:
           default: ''
         - name: approved_by
           default: ''
+        - name: force_rerun
+          default: 'false'
         - name: warehouse_id
           default: ${var.warehouse_id}
       tasks:
@@ -114,7 +117,9 @@ resources:
               proposal_run_id: '{{job.parameters.proposal_run_id}}'
               output_volume_path: ${var.output_volume_path}
               migration_run_id: '{{job.run_id}}'
+              migration_job_id: '{{job.id}}'
               approved_by: '{{job.parameters.approved_by}}'
+              force_rerun: '{{job.parameters.force_rerun}}'
           environment_key: workflow
         - task_key: migrate_semantic_groups
           depends_on:
@@ -151,7 +156,7 @@ resources:
               - PyYAML==6.0.3
 
     datasource_semantic_group:
-      name: '[${bundle.target}] Datasource semantic group'
+      name: 'Datasource semantic group'
       performance_target: PERFORMANCE_OPTIMIZED
       tags:
         aidevkit_project: bi-migration-blueprint
@@ -219,7 +224,7 @@ resources:
               - PyYAML==6.0.3
 
     datasource_semantic_repair:
-      name: '[${bundle.target}] Datasource semantic repair'
+      name: 'Datasource semantic repair'
       performance_target: PERFORMANCE_OPTIMIZED
       tags:
         aidevkit_project: bi-migration-blueprint

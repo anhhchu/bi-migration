@@ -13,6 +13,7 @@ for widget_name in (
     "input_volume_path",
     "workflow_run_id",
     "job_run_id",
+    "job_start_time",
     "output_volume_path",
     "candidate_catalog",
     "candidate_schema",
@@ -39,6 +40,7 @@ manifest = build_workflow_manifest(
     job_run_id=dbutils.widgets.get("job_run_id"),
     input_volume_path=dbutils.widgets.get("input_volume_path"),
     config=config,
+    created_at=dbutils.widgets.get("job_start_time").strip() or None,
 )
 manifest_path = Path(manifest["runtime"]["run_root"]) / "manifest.json"
 manifest_path.parent.mkdir(parents=True, exist_ok=True)

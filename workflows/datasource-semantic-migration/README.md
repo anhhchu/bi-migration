@@ -204,22 +204,28 @@ The proposal Job:
 
 ### 2. Review and migrate
 
-Open the grouping report, then run:
-
-```bash
-databricks bundle run datasource_semantic_migration \
-  --target customer-dev \
-  --profile <profile-name>
-```
-
-With no parameters, the Job uses the latest pending proposal. To migrate an older proposal explicitly:
+Open `reports/semantic-grouping-review.html` for the proposal run. Its **Approve this proposal** panel shows the exact `proposal_run_id`, the run folder, Jobs UI steps, and a ready-to-copy CLI command. Start the migration Job for that run:
 
 ```bash
 databricks bundle run datasource_semantic_migration \
   --target customer-dev \
   --profile <profile-name> \
-  --params proposal_run_id=<proposal-job-run-id>
+  --params proposal_run_id=<proposal-run-id>
 ```
+
+`proposal_run_id` accepts the numeric run ID or the full run folder name, such as `128805802411871--2026-11-23T18-42Z`. In the Jobs UI, use **Run now with different parameters** and set `proposal_run_id`. The App passes it automatically.
+
+How the Job chooses a proposal:
+
+| Situation | Result |
+|---|---|
+| `proposal_run_id` is set | Migrates exactly that proposal. |
+| Empty, and one proposal awaits approval | Migrates it automatically and logs which run it chose. |
+| Empty, and you re-ran a proposal for the same input folder | The newest proposal for that input supersedes older ones, so it is still chosen automatically. |
+| Empty, and proposals for different input folders await approval | Stops within seconds and lists every pending run with its input, groups, and copy-paste command. Nothing is migrated. |
+| The proposal was already sent to migration | Rejected. Set `force_rerun=true` to migrate it again deliberately. |
+
+The approver is recorded as `approved_by` when provided (the App sends the signed-in user); otherwise the Job records the user who started the run.
 
 The migration Job records the approver, launches one child Job per readable semantic group, and refreshes the run-level report.
 
@@ -231,7 +237,7 @@ Repair an existing candidate without rebuilding it:
 databricks bundle run datasource_semantic_repair \
   --target customer-dev \
   --profile <profile-name> \
-  --params group_path=/Volumes/<catalog>/<schema>/<volume>/runs/<run-id>/groups/<group-slug>
+  --params group_path=/Volumes/<catalog>/<schema>/<volume>/runs/<run-id>--<UTC-start-time>/groups/<group-slug>
 ```
 
 ## How Metric Views Are Evaluated
@@ -299,7 +305,7 @@ The current evaluator does not compare Metric View results with Hyper or Tableau
 ## Outputs
 
 ```text
-<output-volume>/runs/<proposal-run-id>/
+<output-volume>/runs/<proposal-run-id>--<UTC-start-time>/
   manifest.json
   groups/<group-slug>/
     mapping.yaml
@@ -322,6 +328,8 @@ The current evaluator does not compare Metric View results with Hyper or Tableau
       repair-review.html
   _internal/
 ```
+
+New run folders use names such as `128805802411871--2026-11-23T18-42Z`. The immutable Databricks run ID remains first for API correlation, while the Databricks Job start time in UTC makes Volume folders recognizable. Existing numeric-only run folders remain supported.
 
 Start with the HTML files under `reports/`. Detailed IR, SQL, patches, failure classifications, query results, and retry evidence remain under `_internal/` for troubleshooting.
 
