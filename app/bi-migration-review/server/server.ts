@@ -62,7 +62,7 @@ type SemanticRunGroup = {
 };
 
 const appRoot = process.cwd();
-let activeMigrationName = process.env.BI_MIGRATION_NAME ?? 'superstore-migration';
+let activeMigrationName = process.env.BI_MIGRATION_NAME ?? 'my-migration';
 let activeMigrationMode: MigrationMode = 'semantic_model';
 const defaultTargetCatalog = process.env.BI_MIGRATION_TARGET_CATALOG ?? 'main';
 const defaultTargetSchema = process.env.BI_MIGRATION_TARGET_SCHEMA ?? 'superstore';

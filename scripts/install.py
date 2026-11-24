@@ -13,6 +13,7 @@ needs (after confirmation), deploys the workflow Jobs, then deploys the App wire
 from __future__ import annotations
 
 import argparse
+import re
 import json
 import os
 import shutil
@@ -79,10 +80,17 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Install the BI semantic migration workflow and App.")
     parser.add_argument("--profile", required=True, help="Databricks CLI profile (OAuth)")
     parser.add_argument("--catalog", required=True, help="Existing Unity Catalog catalog to install into")
-    parser.add_argument("--schema", default="bi_migration", help="Schema for candidate Metric Views and Volumes")
+    parser.add_argument("--schema", default="bi_migration", help="Schema for candidate Metric Views (existing or new)")
+    parser.add_argument("--staging-schema", help="Schema recorded for staging objects (default: same as --schema)")
+    parser.add_argument("--output-volume", help="Existing Volume for run artifacts, as catalog.schema.volume")
     parser.add_argument("--warehouse-id", help="SQL warehouse ID (default: running, serverless, or starter warehouse)")
     parser.add_argument("--upload-volume", help="Existing Volume for App uploads, as catalog.schema.volume")
     parser.add_argument("--target", default="dev", help="Bundle target name")
+    parser.add_argument(
+        "--app-name",
+        default="bi-migration-review",
+        help="Databricks App name; must be unique in the workspace (lowercase letters, numbers, hyphens)",
+    )
     parser.add_argument("--yes", action="store_true", help="Create missing schemas and Volumes without asking")
     parser.add_argument("--dry-run", action="store_true", help="Show the plan without changing the workspace")
     parser.add_argument(
@@ -92,11 +100,15 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    staging_schema = f"{args.schema}_staging"
-    output_volume = f"{args.catalog}.{args.schema}.semantic_workflows"
+    # The staging schema is only recorded today, so by default it is the candidate schema (nothing extra to create).
+    if not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,28}[a-z0-9])?", args.app_name):
+        fail("--app-name must be 2-30 lowercase letters, numbers, or hyphens, starting and ending with a letter or number")
+    staging_schema = args.staging_schema or args.schema
+    output_volume = args.output_volume or f"{args.catalog}.{args.schema}.semantic_workflows"
     upload_volume = args.upload_volume or f"{args.catalog}.{args.schema}.migration_inputs"
-    if len(upload_volume.split(".")) != 3:
-        fail("--upload-volume must be catalog.schema.volume")
+    for option, value in (("--output-volume", output_volume), ("--upload-volume", upload_volume)):
+        if len(value.split(".")) != 3:
+            fail(f"{option} must be catalog.schema.volume")
 
     step("Checking prerequisites")
     for tool in ("databricks", "uv"):
@@ -111,8 +123,14 @@ def main() -> None:
     warehouse = pick_warehouse(args.profile, args.warehouse_id)
     print(f"  SQL warehouse: {warehouse['name']} ({warehouse['id']}); choose another with --warehouse-id")
 
+    existing_app = cli(args.profile, "apps", "get", args.app_name, check=False)
+    app_owner = (existing_app or {}).get("creator")
+    if existing_app and app_owner and app_owner != user.get("userName"):
+        fail(f"App '{args.app_name}' already exists in this workspace (created by {app_owner}). Choose another --app-name.")
+    app_state = "exists, will be updated" if existing_app else "will be created"
+
     missing = []
-    for schema in (args.schema, staging_schema):
+    for schema in dict.fromkeys((args.schema, staging_schema)):
         if not cli(args.profile, "schemas", "get", f"{args.catalog}.{schema}", check=False):
             missing.append(("schema", schema))
     for volume in (output_volume, upload_volume):
@@ -124,6 +142,7 @@ def main() -> None:
     print(f"  Staging schema          {args.catalog}.{staging_schema}")
     print(f"  Run artifacts Volume    {output_volume}")
     print(f"  Upload Volume           {upload_volume}")
+    print(f"  App                     {args.app_name} ({app_state})")
     print(f"  Create first            {', '.join(name for _, name in missing) or 'nothing'}")
     print("  Then deploy             semantic workflow Jobs, dashboard Jobs, and the App")
     settings = {
@@ -134,6 +153,7 @@ def main() -> None:
         "upload_volume": upload_volume,
         "warehouse_id": warehouse["id"],
         "target": args.target,
+        "app_name": args.app_name,
     }
     if args.dry_run:
         return
@@ -151,10 +171,17 @@ def main() -> None:
     for kind, name in missing:
         step(f"Creating {kind} {name}")
         if kind == "schema":
-            cli(args.profile, "schemas", "create", name, args.catalog)
+            created = cli(args.profile, "schemas", "create", name, args.catalog, check=False)
+            hint = f"Ask an admin to create schema {args.catalog}.{name}, or pass an existing one with --schema."
         else:
             catalog, schema, volume = name.split(".")
-            cli(args.profile, "volumes", "create", catalog, schema, volume, "MANAGED")
+            created = cli(args.profile, "volumes", "create", catalog, schema, volume, "MANAGED", check=False)
+            hint = (
+                f"Ask an admin to create Volume {name} (or grant CREATE VOLUME on {catalog}.{schema}), "
+                "or pass an existing one with --output-volume / --upload-volume."
+            )
+        if created is None:
+            fail(f"Could not create {kind} {name}; you may lack permission. {hint}")
 
     saved = save_settings(args.profile, settings)
     apply_settings(settings, args.target)
@@ -181,7 +208,7 @@ def main() -> None:
         cwd=ROOT,
         env={},
     )
-    app = cli(args.profile, "apps", "get", "bi-migration-review", check=False) or {}
+    app = cli(args.profile, "apps", "get", args.app_name, check=False) or {}
 
     print("\n✔ Installed.")
     print(f"  App: {app.get('url', 'see Compute → Apps in your workspace')}")

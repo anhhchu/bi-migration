@@ -164,7 +164,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Deploy BI migration Jobs, bundle resources, and Databricks App.")
     parser.add_argument("--profile", default="DEFAULT")
     parser.add_argument("--target", default="dev")
-    parser.add_argument("--app-name", default="bi-migration-review")
+    parser.add_argument("--app-name", help="Databricks App name (default: saved settings, else bi-migration-review)")
     parser.add_argument("--component", choices=("all", "jobs", "app"), default="all")
     # Defaults come from the deployed semantic workflow bundle; pass them only to override.
     parser.add_argument("--datasource-semantic-proposal-job-id")
@@ -177,6 +177,7 @@ def main() -> None:
     settings = require_settings(args.profile)
     apply_settings(settings, args.target)
     args.upload_volume_full_name = args.upload_volume_full_name or settings["upload_volume"]
+    args.app_name = args.app_name or settings.get("app_name") or "bi-migration-review"
     args.datasource_semantic_volume_full_name = args.datasource_semantic_volume_full_name or settings["output_volume"]
     if not (
         args.datasource_semantic_proposal_job_id
@@ -458,6 +459,8 @@ def main() -> None:
         "--var",
         f"datasource_semantic_volume_full_name={args.datasource_semantic_volume_full_name}",
         *(["--var", f"volume_full_name={args.upload_volume_full_name}"] if args.upload_volume_full_name else []),
+        "--var",
+        f"app_name={args.app_name}",
     )
     run_cli(
         args.profile,

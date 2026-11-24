@@ -1297,7 +1297,7 @@ function UploadPanel({
                   onBlur={() => {
                     if (migrationName.trim() && migrationName !== uploads?.migrationName) void applyMigrationName();
                   }}
-                  placeholder="superstore-migration"
+                  placeholder="my-migration"
                 />
               </span>
             </label>

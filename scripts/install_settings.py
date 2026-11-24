@@ -58,8 +58,12 @@ def workflow_variables(settings: dict[str, Any]) -> dict[str, str]:
     }
 
 
+DEFAULT_APP_NAME = "bi-migration-review"
+
+
 def app_variables(settings: dict[str, Any]) -> dict[str, str]:
     return {
+        "app_name": settings.get("app_name") or DEFAULT_APP_NAME,
         "volume_full_name": settings["upload_volume"],
         "datasource_semantic_volume_full_name": settings["output_volume"],
     }

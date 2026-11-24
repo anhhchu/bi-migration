@@ -2,6 +2,9 @@ bundle:
   name: bi-migration-review
 
 variables:
+  app_name:
+    description: Databricks App name (unique per workspace)
+    default: bi-migration-review
   volume_full_name:
     description: Three-level Unity Catalog volume name used for migration assets
   dashboard_import_job_id:
@@ -20,7 +23,7 @@ variables:
 resources:
   apps:
     app:
-      name: "bi-migration-review"
+      name: ${var.app_name}
       description: "Review BI migration groups, mappings, and readiness evidence"
       source_code_path: ./app/bi-migration-review
 
