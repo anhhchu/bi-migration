@@ -15,8 +15,10 @@ variables:
     description: Isolated schema for temporary Hyper fixtures
   analysis_batch_size:
     description: Maximum unique datasource files analyzed by one task iteration
+    default: 25
   analysis_batch_workers:
     description: Concurrent datasource parsers within one analysis batch
+    default: 8
   warehouse_id:
     description: SQL warehouse used for Metric View DDL and queries
 
@@ -26,15 +28,9 @@ artifacts:
     path: .
     build: uv build
 
+# Catalog, schemas, Volume, and warehouse differ per workspace. scripts/install.py saves them per
+# CLI profile and writes them to .databricks/bundle/<target>/variable-overrides.json (gitignored).
 targets:
   dev:
     default: true
     mode: development
-    variables:
-      output_volume_path: /Volumes/main/bi_migration/semantic_workflows
-      candidate_catalog: main
-      candidate_schema: bi_migration
-      staging_schema: bi_migration_staging
-      analysis_batch_size: 25
-      analysis_batch_workers: 8
-      warehouse_id: <warehouse-id>

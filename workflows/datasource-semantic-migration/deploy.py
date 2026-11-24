@@ -4,12 +4,15 @@ from __future__ import annotations
 import argparse
 import json
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 from typing import Any
 
 
 ROOT = Path(__file__).resolve().parent
+sys.path.insert(0, str(ROOT.parents[1] / "scripts"))
+from install_settings import load_settings, workflow_variables, write_overrides  # noqa: E402
 AUTOMATION_ENDPOINT = "/api/2.0/alerts-internal/scheduled-insights"
 AUTOMATIONS = {
     "semantic_grouping": "group_semantic_datasources.md",
@@ -116,7 +119,19 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     arguments = parse_args()
-    run_cli(["bundle", "validate", "--strict", "--output", "json"], profile=arguments.profile, target=arguments.target)
+    # Catalog, schemas, Volume, and warehouse are per workspace; install.py saves them per profile.
+    settings = load_settings(arguments.profile)
+    if settings:
+        write_overrides(ROOT, arguments.target, workflow_variables(settings))
+    # Without saved settings, values may still come from a target in databricks.yml or BUNDLE_VAR_* variables.
+    try:
+        run_cli(["bundle", "validate", "--strict", "--output", "json"], profile=arguments.profile, target=arguments.target)
+    except subprocess.CalledProcessError as error:
+        raise SystemExit(
+            f"Bundle validation failed:\n{(error.stderr or error.stdout or '').strip()}\n\n"
+            "If catalog, schema, Volume, or warehouse values are missing, run from the repository root: "
+            f"python3 scripts/install.py --profile {arguments.profile} --catalog <catalog>"
+        ) from error
     run_cli(["bundle", "deploy", "--output", "json"], profile=arguments.profile, target=arguments.target)
     summary = run_cli(["bundle", "summary", "--output", "json"], profile=arguments.profile, target=arguments.target)
     summary["target"] = arguments.target

@@ -8,6 +8,12 @@ import { z } from 'zod';
 import type { Request, Response } from 'express';
 import { semanticInputRoot } from './semantic-input';
 
+// Databricks Apps provide DATABRICKS_HOST at runtime; derive the URL used for workspace links from it.
+if (!process.env.DATABRICKS_WORKSPACE_URL && process.env.DATABRICKS_HOST) {
+  const host = process.env.DATABRICKS_HOST.replace(/\/$/, '');
+  process.env.DATABRICKS_WORKSPACE_URL = host.startsWith('http') ? host : `https://${host}`;
+}
+
 type GroupSummary = {
   group_id: string;
   coverage_signature: string;

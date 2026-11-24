@@ -99,17 +99,9 @@ artifacts:
     path: .
     build: uv build
 
+# Volumes and Job IDs differ per workspace: scripts/install.py saves them per CLI profile, and
+# scripts/deploy.py passes them in (via variable-overrides.json and --var).
 targets:
   dev:
     default: true
     mode: development
-    variables:
-      volume_full_name: main.superstore.tableau
-      dashboard_import_job_id: "0"
-      semantic_build_job_id: "0"
-      metric_view_repair_job_id: "0"
-      datasource_semantic_proposal_job_id: "0"
-      datasource_semantic_migration_job_id: "0"
-      datasource_semantic_volume_full_name: main.bi_migration.semantic_workflows
-    workspace:
-      host: https://<workspace-host>

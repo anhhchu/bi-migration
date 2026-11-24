@@ -1,7 +1,5 @@
 command: ['npm', 'run', 'start']
 env:
-  - name: DATABRICKS_WORKSPACE_URL
-    value: https://<workspace-host>
   - name: DATABRICKS_VOLUME_FILES
     valueFrom: files
   - name: DATABRICKS_JOB_ID

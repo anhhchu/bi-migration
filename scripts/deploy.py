@@ -5,10 +5,13 @@ import argparse
 import re
 import json
 import subprocess
+import sys
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from install_settings import apply_settings, require_settings  # noqa: E402
 JOB_PARAMETERS = [
     {"name": "run_id", "default": ""},
     {"name": "group_id", "default": ""},
@@ -133,20 +136,59 @@ def deploy_job(
     return int(run_json(profile, "jobs", "create", "--json", json.dumps(settings))["job_id"])
 
 
+def workflow_bundle_outputs(profile: str, target: str) -> dict[str, str]:
+    """Job IDs and output Volume of the deployed datasource semantic workflow bundle."""
+    command = ["databricks", "bundle", "summary", "-t", target, "--profile", profile, "-o", "json"]
+    result = subprocess.run(command, cwd=ROOT / "workflows" / "datasource-semantic-migration", capture_output=True, text=True)
+    if result.returncode:
+        raise RuntimeError(
+            "Deploy the semantic workflow first (or run scripts/install.py): "
+            + (result.stderr.strip() or result.stdout.strip())
+        )
+    summary = json.loads(result.stdout)
+    jobs = summary.get("resources", {}).get("jobs", {})
+    try:
+        proposal = jobs["datasource_semantic_orchestrator"]["id"]
+        migration = jobs["datasource_semantic_migration"]["id"]
+    except KeyError as error:
+        raise RuntimeError("The semantic workflow Jobs are not deployed yet; run scripts/install.py.") from error
+    volume_path = summary["variables"]["output_volume_path"]["value"]
+    return {
+        "proposal_job_id": str(proposal),
+        "migration_job_id": str(migration),
+        "volume": ".".join(volume_path.removeprefix("/Volumes/").strip("/").split("/")[:3]),
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Deploy BI migration Jobs, bundle resources, and Databricks App.")
     parser.add_argument("--profile", default="DEFAULT")
     parser.add_argument("--target", default="dev")
     parser.add_argument("--app-name", default="bi-migration-review")
     parser.add_argument("--component", choices=("all", "jobs", "app"), default="all")
-    parser.add_argument("--datasource-semantic-proposal-job-id", default="0")
-    parser.add_argument("--datasource-semantic-migration-job-id", default="0")
-    parser.add_argument(
-        "--datasource-semantic-volume-full-name",
-        default="main.bi_migration.semantic_workflows",
-    )
+    # Defaults come from the deployed semantic workflow bundle; pass them only to override.
+    parser.add_argument("--datasource-semantic-proposal-job-id")
+    parser.add_argument("--datasource-semantic-migration-job-id")
+    parser.add_argument("--datasource-semantic-volume-full-name")
+    parser.add_argument("--upload-volume-full-name", help="Volume for App uploads (default: saved settings)")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
+    # Workspace-specific catalog, schemas, Volumes, and warehouse come from this profile's install settings.
+    settings = require_settings(args.profile)
+    apply_settings(settings, args.target)
+    args.upload_volume_full_name = args.upload_volume_full_name or settings["upload_volume"]
+    args.datasource_semantic_volume_full_name = args.datasource_semantic_volume_full_name or settings["output_volume"]
+    if not (
+        args.datasource_semantic_proposal_job_id
+        and args.datasource_semantic_migration_job_id
+        and args.datasource_semantic_volume_full_name
+    ):
+        workflow = workflow_bundle_outputs(args.profile, args.target)
+        args.datasource_semantic_proposal_job_id = args.datasource_semantic_proposal_job_id or workflow["proposal_job_id"]
+        args.datasource_semantic_migration_job_id = (
+            args.datasource_semantic_migration_job_id or workflow["migration_job_id"]
+        )
+        args.datasource_semantic_volume_full_name = args.datasource_semantic_volume_full_name or workflow["volume"]
 
     current_user = run_json(args.profile, "current-user", "me")["userName"]
     bundle_root = f"/Workspace/Users/{current_user}/.bundle/bi-migration-review/{args.target}/files"
@@ -383,6 +425,20 @@ def main() -> None:
         print(json.dumps(deployed, indent=2))
         return
 
+    # Remember the Job IDs too, so plain `databricks bundle` commands resolve every variable.
+    from install_settings import write_overrides
+
+    write_overrides(
+        ROOT,
+        args.target,
+        {
+            "dashboard_import_job_id": str(dashboard_job_id),
+            "semantic_build_job_id": str(semantic_job_id),
+            "metric_view_repair_job_id": str(repair_job_id),
+            "datasource_semantic_proposal_job_id": str(args.datasource_semantic_proposal_job_id),
+            "datasource_semantic_migration_job_id": str(args.datasource_semantic_migration_job_id),
+        },
+    )
     run_cli(
         args.profile,
         "bundle",
@@ -401,6 +457,7 @@ def main() -> None:
         f"datasource_semantic_migration_job_id={args.datasource_semantic_migration_job_id}",
         "--var",
         f"datasource_semantic_volume_full_name={args.datasource_semantic_volume_full_name}",
+        *(["--var", f"volume_full_name={args.upload_volume_full_name}"] if args.upload_volume_full_name else []),
     )
     run_cli(
         args.profile,
