@@ -1,4 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { DocsDialog, type AppDocument } from './DocsDialog';
+import { HomePage } from './HomePage';
+import { DASHBOARD_MIGRATION_ENABLED } from '@/lib/features';
+import { statusLabel, statusTone } from '@/lib/status';
+import { catalogExplorerUrl } from '@/lib/catalog-links';
+import { isOneOf, isString, readPersistedValue, usePersistentState, writePersistedValue } from '@/lib/persistent-state';
 import {
   Alert,
   AlertDescription,
@@ -39,10 +45,10 @@ import {
   CircleHelp,
   Copy,
   ExternalLink,
+  FileText,
   FileUp,
   FileWarning,
   FolderSearch,
-  History,
   Layers3,
   Play,
   UserRound,
@@ -184,11 +190,31 @@ type SemanticRunGroup = {
   candidate_metric_view_fqn?: string;
   status: string;
   readiness?: string | null;
+  gateStatus?: string | null;
   migrationStatus?: string | null;
 };
 
+const MIGRATION_RUNNING_STATUSES = new Set(['MIGRATION_RUNNING', 'MIGRATION_SUBMITTED']);
+
+/** Status shown for one group: its gate result once evaluated, otherwise where it is in the workflow. */
+function groupDisplayStatus(group: SemanticRunGroup, runStatus: string | undefined): string {
+  if (group.gateStatus || group.readiness) return group.gateStatus ?? group.readiness ?? group.status;
+  if (runStatus && MIGRATION_RUNNING_STATUSES.has(runStatus)) return 'MIGRATION_IN_PROGRESS';
+  if (runStatus && !PENDING_APPROVAL_STATUSES.has(runStatus)) return 'NO_RESULT';
+  return group.status;
+}
+
 type SemanticRun = {
   runId: string;
+  approval?: {
+    approvedBy?: string | null;
+    approvedAt?: string | null;
+    migrationRunId?: string | null;
+    migrationRunUrl?: string | null;
+  } | null;
+  manifestStatus?: string | null;
+  supersededBy?: string | null;
+  runFolder: string;
   runPath: string;
   createdAt?: string | null;
   inputVolumePath?: string | null;
@@ -206,6 +232,183 @@ type SemanticRunsResponse = {
   detail?: string;
 };
 
+type GateStage = {
+  key: string;
+  label: string;
+  status: 'PASS' | 'WARN' | 'FAIL' | 'NOT_RUN';
+  summary: string;
+  next_step?: string | null;
+  measures?: Array<{ name: string; additivity: string; basis: string; expression: string }>;
+  tables?: Array<{ table: string; grain?: string | null }>;
+};
+
+type ActionItem = {
+  title: string;
+  detail: string;
+  what_to_do: string;
+  blocking: boolean;
+  expression?: string | null;
+  names?: string[];
+};
+
+type ActionGroups = {
+  groups: Array<{
+    category: string;
+    label: string;
+    owner: string;
+    why_human: string;
+    blocking: boolean;
+    items: ActionItem[];
+  }>;
+  automatic: Array<{ title: string; detail: string; names?: string[] }>;
+  blocking_count: number;
+  review_count: number;
+};
+
+function ActionGroupsView({ actionGroups }: { actionGroups: ActionGroups }) {
+  return (
+    <div className="action-groups">
+      <p className="action-groups__summary">
+        {actionGroups.blocking_count} blocking · {actionGroups.review_count} to review
+      </p>
+      {actionGroups.groups.map((group) => (
+        <section
+          key={group.category}
+          className={group.blocking ? 'action-group action-group--blocking' : 'action-group'}
+        >
+          <header>
+            <h4>
+              {group.label}
+              <span className="action-group__count">
+                {group.items.reduce((total, item) => total + (item.names?.length ?? 1), 0)}
+              </span>
+            </h4>
+            <span className="action-group__owner">{group.owner}</span>
+          </header>
+          <p className="action-group__why">
+            <strong>Who:</strong> {group.owner}. <strong>Why a person is needed:</strong> {group.why_human}
+          </p>
+          <ul>
+            {group.items.map((item) => (
+              <li key={item.title}>
+                <div className="action-group__title">
+                  <span>{item.title}</span>
+                  {item.blocking ? <StatusBadge status="BLOCKING" /> : null}
+                </div>
+                {(item.names?.length ?? 0) > 1 ? (
+                  <div className="action-names">
+                    {item.names?.map((name) => (
+                      <span key={name}>{name}</span>
+                    ))}
+                  </div>
+                ) : null}
+                <p>{item.detail}</p>
+                {item.expression ? <code className="action-expression">{item.expression}</code> : null}
+                <small>What to do: {item.what_to_do}</small>
+              </li>
+            ))}
+          </ul>
+        </section>
+      ))}
+      {actionGroups.automatic.length ? (
+        <details className="action-automatic">
+          <summary>Handled automatically · {actionGroups.automatic.length} (no action needed)</summary>
+          <ul>
+            {actionGroups.automatic.map((item) => (
+              <li key={item.detail}>
+                <strong>{item.title}</strong>: {item.detail}
+                {(item.names?.length ?? 0) > 1 ? (
+                  <div className="action-names">
+                    {item.names?.map((name) => (
+                      <span key={name}>{name}</span>
+                    ))}
+                  </div>
+                ) : null}
+              </li>
+            ))}
+          </ul>
+        </details>
+      ) : null}
+    </div>
+  );
+}
+
+type ReleaseGate = { status: string; headline: string; next_step?: string | null; stages: GateStage[] };
+
+const GATE_STAGE_TEXT: Record<GateStage['status'], string> = {
+  PASS: 'Pass',
+  WARN: 'Review',
+  FAIL: 'Fix',
+  NOT_RUN: 'Not run',
+};
+
+function ReleaseGateCard({ gate }: { gate: ReleaseGate }) {
+  const contract = gate.stages.find((stage) => stage.key === 'contract');
+  return (
+    <Card className="workspace-card release-gate-card">
+      <CardHeader>
+        <div className="review-card-heading">
+          <CardTitle>Release gate</CardTitle>
+          <StatusBadge status={gate.status} />
+        </div>
+      </CardHeader>
+      <CardContent className="semantic-review-section">
+        <div className="run-next-step">
+          <strong>{gate.headline}</strong>
+          {gate.next_step ? <p>Next step: {gate.next_step}</p> : null}
+        </div>
+        <ol className="gate-stages">
+          {gate.stages.map((stage) => (
+            <li key={stage.key} className={`gate-stage gate-stage--${stage.status.toLowerCase()}`}>
+              <span className="gate-stage__marker" aria-hidden="true" />
+              <div>
+                <div className="gate-stage__title">
+                  <strong>{stage.label}</strong>
+                  <span className="gate-stage__status">{GATE_STAGE_TEXT[stage.status]}</span>
+                </div>
+                <p>{stage.summary}</p>
+                {stage.next_step && stage.status !== 'PASS' ? <small>Next: {stage.next_step}</small> : null}
+              </div>
+            </li>
+          ))}
+        </ol>
+        {contract?.measures?.length ? (
+          <details className="gate-contract">
+            <summary>Contract details: grain and measure additivity (inferred)</summary>
+            {contract.tables?.length ? (
+              <ul>
+                {contract.tables.map((table) => (
+                  <li key={table.table}>
+                    <code>{table.table}</code>: {table.grain ?? 'grain not recorded'}
+                  </li>
+                ))}
+              </ul>
+            ) : null}
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Measure</TableHead>
+                  <TableHead>Additivity</TableHead>
+                  <TableHead>Why</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {contract.measures.map((measure) => (
+                  <TableRow key={measure.name}>
+                    <TableCell>{measure.name}</TableCell>
+                    <TableCell>{measure.additivity.replaceAll('_', '-')}</TableCell>
+                    <TableCell>{measure.basis}</TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </details>
+        ) : null}
+      </CardContent>
+    </Card>
+  );
+}
+
 type SemanticGroupReview = {
   group: SemanticRunGroup;
   sourceSummary?: {
@@ -213,11 +416,14 @@ type SemanticGroupReview = {
     datasource_count?: number;
     target_tables?: string[];
     datasources?: Array<{ datasource_name?: string; source_path?: string }>;
+    supporting_datasources?: Array<{ datasource_name?: string; source_path?: string }>;
   } | null;
   migrationReview?: {
     status?: string;
     readiness?: string;
     headline?: string;
+    gate?: ReleaseGate;
+    action_groups?: ActionGroups;
     candidate?: { metric_view_fqn?: string };
     coverage?: {
       semantic_coverage_percent?: number;
@@ -225,7 +431,14 @@ type SemanticGroupReview = {
       measures_created?: number;
       business_items_not_translated?: number;
     };
-    recommended_actions?: Array<{ priority?: string; title?: string; description?: string; items?: string[] }>;
+    recommended_actions?: Array<{
+      priority?: string;
+      title?: string;
+      description?: string;
+      items?: string[];
+      details?: Array<{ name: string; expression: string }>;
+      how_to_fix?: string;
+    }>;
   } | null;
   repairReview?: {
     status?: string;
@@ -244,8 +457,19 @@ type SemanticGroupReview = {
       passed?: boolean;
       gap_count?: number;
     }>;
-    blocking_findings?: Array<{ source_name?: string; status?: string; recommended_action?: string }>;
+    blocking_findings?: Array<{
+      source_name?: string;
+      status?: string;
+      recommended_action?: string;
+      failure_details?: Array<{ code?: string; meaning?: string; action?: string }>;
+      target?: { expr?: string } | null;
+      query_detail?: { status?: string; reason?: string };
+    }>;
   } | null;
+  reports?: {
+    migrationReviewHtml?: string | null;
+    repairReviewHtml?: string | null;
+  };
   artifacts: Record<string, string>;
   error?: string;
 };
@@ -400,11 +624,104 @@ const issueLabels: Record<string, string> = {
   mapping_document_errors: 'Mapping documents quarantined',
 };
 
+const PENDING_APPROVAL_STATUSES = new Set(['GROUPING_REVIEW_REQUIRED', 'AWAITING_APPROVAL']);
+
+let workspaceUrlRequest: Promise<string | null> | null = null;
+
+/** Workspace address for deep links, fetched once per page load. */
+function useWorkspaceUrl() {
+  const [workspaceUrl, setWorkspaceUrl] = useState<string | null>(null);
+  useEffect(() => {
+    workspaceUrlRequest ??= fetch('/api/session')
+      .then((response) => response.json() as Promise<{ workspaceUrl?: string | null }>)
+      .then((payload) => payload.workspaceUrl ?? null)
+      .catch(() => null);
+    void workspaceUrlRequest.then(setWorkspaceUrl);
+  }, []);
+  return workspaceUrl;
+}
+
+/** A Metric View name with a Catalog Explorer link once the view exists. */
+function MetricViewName({ fullName, exists = true }: { fullName?: string | null; exists?: boolean }) {
+  const workspaceUrl = useWorkspaceUrl();
+  const href = exists ? catalogExplorerUrl(workspaceUrl, fullName) : null;
+  return (
+    <div className="metric-view-name">
+      <code>{fullName ?? 'Not created'}</code>
+      {href ? (
+        <a className="job-run-link" href={href} target="_blank" rel="noreferrer">
+          Open in Catalog Explorer <ExternalLink aria-hidden="true" />
+        </a>
+      ) : null}
+    </div>
+  );
+}
+
 export default function App() {
-  const [view, setView] = useState<'upload' | 'review' | 'runs'>(() => {
+  const [view, setView] = useState<'home' | 'upload' | 'review' | 'semantic' | 'runs'>(() => {
     const requestedView = new URLSearchParams(window.location.search).get('view');
-    return requestedView === 'review' || requestedView === 'runs' ? requestedView : 'upload';
+    return requestedView === 'upload' ||
+      requestedView === 'review' ||
+      requestedView === 'semantic' ||
+      requestedView === 'runs'
+      ? requestedView
+      : 'home';
   });
+  const [migrationMode, setMigrationMode] = usePersistentState<MigrationMode>(
+    'migration-mode',
+    'semantic_model',
+    isOneOf(['semantic_model', 'dashboard'] as const)
+  );
+  useEffect(() => {
+    const requestedMode = new URLSearchParams(window.location.search).get('mode');
+    if (requestedMode === 'dashboard' || requestedMode === 'semantic_model') setMigrationMode(requestedMode);
+  }, []);
+  useEffect(() => {
+    // Dashboard migration is temporarily hidden; never leave a saved or linked dashboard mode active.
+    if (!DASHBOARD_MIGRATION_ENABLED && migrationMode === 'dashboard') setMigrationMode('semantic_model');
+  }, [migrationMode]);
+  const [semanticRunStatus, setSemanticRunStatus] = useState<string | null>(null);
+  // Which run the run browser should select when a step is opened (nonce re-applies the same request).
+  const [runFocus, setRunFocus] = useState<RunFocus>({ nonce: 0 });
+  // The step a user opened decides what is shown; run status only marks steps as done.
+  const [semanticStepView, setSemanticStepView] = useState<2 | 3>(2);
+  const semanticStep = view === 'upload' ? 1 : semanticStepView;
+  const selectedRunApproved = Boolean(semanticRunStatus && !PENDING_APPROVAL_STATUSES.has(semanticRunStatus));
+  const previousRunStatus = useRef<string | null>(null);
+  useEffect(() => {
+    // Approving moves the user forward once; they can still go back to step 2.
+    if (semanticRunStatus === 'MIGRATION_SUBMITTED' && previousRunStatus.current !== 'MIGRATION_SUBMITTED') {
+      setSemanticStepView(3);
+    }
+    previousRunStatus.current = semanticRunStatus;
+  }, [semanticRunStatus]);
+  const pageIntro =
+    view === 'runs'
+      ? {
+          title: 'Previous semantic migrations',
+          description: 'Reopen any run, select a semantic group, and review migration and repair evidence.',
+        }
+      : migrationMode !== 'semantic_model'
+        ? {
+            title: 'Migrate Tableau dashboards',
+            description: 'Inventory workbooks, approve mappings, and create AI/BI dashboards with traceable approvals.',
+          }
+        : semanticStep === 1
+          ? {
+              title: 'Propose semantic groups',
+              description:
+                'Provide Tableau datasources and a table mapping. The workflow groups them into semantic domains for your review; nothing is created yet.',
+            }
+          : semanticStep === 2
+            ? {
+                title: 'Approve and migrate',
+                description:
+                  'Check each proposed group, then approve. Approval starts one candidate Metric View build per group.',
+              }
+            : {
+                title: 'Review Metric Views',
+                description: 'Inspect each candidate Metric View, its evaluation gates, and automatic repair results.',
+              };
   const [review, setReview] = useState<ReviewResponse | null>(null);
   const [selectedGroupId, setSelectedGroupId] = useState<string | null>(null);
   const [detail, setDetail] = useState<GroupDetail | null>(null);
@@ -415,6 +732,7 @@ export default function App() {
     () => new URLSearchParams(window.location.search).get('mapping') === 'open'
   );
   const [sessionUser, setSessionUser] = useState<{ displayName: string; userName: string } | null>(null);
+  const [openDocument, setOpenDocument] = useState<AppDocument | null>(null);
 
   useEffect(() => {
     void fetch('/api/session')
@@ -500,12 +818,12 @@ export default function App() {
               <h1 className="app-title">Migration review</h1>
             </div>
             <div className="header-actions">
-              <a className="header-doc-link" href="/api/docs/project-plan" target="_blank" rel="noreferrer">
-                Project plan
-              </a>
-              <a className="header-doc-link" href="/api/docs/mapping-guide" target="_blank" rel="noreferrer">
+              <button type="button" className="header-doc-link" onClick={() => setOpenDocument('installation-guide')}>
+                Installation guide
+              </button>
+              <button type="button" className="header-doc-link" onClick={() => setOpenDocument('mapping-guide')}>
                 Mapping guide
-              </a>
+              </button>
               <div className="header-user" title={sessionUser?.userName || sessionUser?.displayName}>
                 <UserRound className="size-4" aria-hidden="true" />
                 <span>{sessionUser?.displayName || 'Loading user…'}</span>
@@ -514,61 +832,146 @@ export default function App() {
           </div>
         </header>
 
-        <div className="app-body">
-          <aside className="workflow-sidebar">
-            <p className="workflow-sidebar__label">Migration workflow</p>
-            <nav aria-label="Migration workflow steps">
-              <button
-                className={view === 'upload' ? 'workflow-step workflow-step--active' : 'workflow-step'}
-                type="button"
-                onClick={() => {
-                  setView('upload');
-                  setMappingOpen(false);
-                }}
-              >
-                <span>1</span>
-                Start migration
-              </button>
-              <button
-                className={view === 'review' && !mappingOpen ? 'workflow-step workflow-step--active' : 'workflow-step'}
-                type="button"
-                onClick={() => {
-                  setMappingOpen(false);
-                  void loadReview('uploaded').then(() => setView('review'));
-                }}
-              >
-                <span>2</span>
-                Review groups
-              </button>
-              <button
-                className={view === 'runs' ? 'workflow-step workflow-step--active' : 'workflow-step'}
-                type="button"
-                onClick={() => {
-                  setMappingOpen(false);
-                  setView('runs');
-                }}
-              >
-                <span>3</span>
-                Previous runs
-              </button>
-            </nav>
-          </aside>
+        <nav className="app-primary-nav" aria-label="Application sections">
+          <div className="app-primary-nav__inner">
+            <button
+              type="button"
+              className={view === 'home' ? 'app-primary-tab app-primary-tab--active' : 'app-primary-tab'}
+              onClick={() => {
+                setMappingOpen(false);
+                setView('home');
+              }}
+            >
+              Home
+            </button>
+            <button
+              type="button"
+              className={
+                view !== 'runs' && view !== 'home' ? 'app-primary-tab app-primary-tab--active' : 'app-primary-tab'
+              }
+              onClick={() =>
+                setView(migrationMode === 'semantic_model' ? 'upload' : review?.groups.length ? 'review' : 'upload')
+              }
+            >
+              Migration
+            </button>
+            <button
+              type="button"
+              className={view === 'runs' ? 'app-primary-tab app-primary-tab--active' : 'app-primary-tab'}
+              onClick={() => {
+                setMappingOpen(false);
+                setView('runs');
+              }}
+            >
+              Previous runs
+            </button>
+          </div>
+        </nav>
+
+        <div className={view === 'runs' ? 'app-body app-body--wide' : 'app-body'}>
+          {view !== 'runs' && view !== 'home' ? (
+            <aside className="workflow-sidebar">
+              <p className="workflow-sidebar__label">Migration workflow</p>
+              {migrationMode === 'semantic_model' ? (
+                <nav aria-label="Semantic model migration steps">
+                  {[
+                    { step: 1, title: 'Propose semantic groups', job: 'Propose semantic groups Job' },
+                    { step: 2, title: 'Approve and migrate', job: 'Migrate approved semantic groups Job' },
+                    { step: 3, title: 'Review Metric Views', job: 'Semantic group and repair Jobs' },
+                  ].map(({ step, title, job }) => (
+                    <button
+                      key={step}
+                      className={[
+                        'workflow-step',
+                        semanticStep === step ? 'workflow-step--active' : '',
+                        step === 2 && selectedRunApproved && semanticStep !== 2 ? 'workflow-step--done' : '',
+                      ]
+                        .filter(Boolean)
+                        .join(' ')}
+                      type="button"
+                      aria-current={semanticStep === step ? 'step' : undefined}
+                      onClick={() => {
+                        if (step === 2) setRunFocus({ preferPending: true, nonce: Date.now() });
+                        if (step !== 1) setSemanticStepView(step as 2 | 3);
+                        setView(step === 1 ? 'upload' : 'semantic');
+                      }}
+                    >
+                      <span>{step === 2 && selectedRunApproved && semanticStep !== 2 ? '✓' : step}</span>
+                      <span className="workflow-step__text">
+                        {title}
+                        <small>{job}</small>
+                      </span>
+                    </button>
+                  ))}
+                </nav>
+              ) : (
+                <nav aria-label="Migration workflow steps">
+                  <button
+                    className={view === 'upload' ? 'workflow-step workflow-step--active' : 'workflow-step'}
+                    type="button"
+                    onClick={() => {
+                      setView('upload');
+                      setMappingOpen(false);
+                    }}
+                  >
+                    <span>1</span>
+                    Start migration
+                  </button>
+                  <button
+                    className={
+                      view === 'review' && !mappingOpen ? 'workflow-step workflow-step--active' : 'workflow-step'
+                    }
+                    type="button"
+                    onClick={() => {
+                      setMappingOpen(false);
+                      void loadReview('uploaded').then(() => setView('review'));
+                    }}
+                  >
+                    <span>2</span>
+                    Review groups
+                  </button>
+                </nav>
+              )}
+            </aside>
+          ) : null}
 
           <main className="review-main">
-            <section className="page-intro">
-              <h2>Scale governed BI migration to Databricks</h2>
-              <p>
-                Inventory BI portfolios, standardize mappings and metrics, orchestrate migration waves, and validate
-                AI/BI outputs with traceable approvals.
-              </p>
-            </section>
+            {view === 'home' ? (
+              <HomePage
+                onStart={(option) => {
+                  if (option === 'runs') {
+                    setView('runs');
+                    return;
+                  }
+                  setMigrationMode(option === 'dashboard' ? 'dashboard' : 'semantic_model');
+                  setView('upload');
+                }}
+              />
+            ) : (
+              <section className="page-intro">
+                {view !== 'runs' && migrationMode === 'semantic_model' ? (
+                  <p className="page-intro__step">Step {semanticStep} of 3</p>
+                ) : null}
+                <h2>{pageIntro.title}</h2>
+                <p>{pageIntro.description}</p>
+              </section>
+            )}
 
             {view === 'upload' ? (
               <UploadPanel
+                migrationMode={migrationMode}
+                onMigrationModeChange={(nextMode) => {
+                  setMigrationMode(nextMode);
+                  setMappingOpen(false);
+                }}
                 onReview={() => {
                   void loadReview('uploaded').then(() => setView('review'));
                 }}
-                onBrowseRuns={() => setView('runs')}
+                onBrowseRuns={(proposalRunId) => {
+                  setRunFocus({ runId: proposalRunId, preferPending: true, nonce: Date.now() });
+                  setSemanticStepView(2);
+                  setView('semantic');
+                }}
               />
             ) : null}
             <div className="review-content" hidden={view !== 'review'}>
@@ -615,32 +1018,72 @@ export default function App() {
                 )
               ) : null}
             </div>
-            {view === 'runs' ? <SemanticRunBrowser sessionUser={sessionUser} /> : null}
+            {view === 'runs' || view === 'semantic' ? (
+              <SemanticRunBrowser
+                sessionUser={sessionUser}
+                focus={view === 'semantic' ? runFocus : undefined}
+                stage={view === 'semantic' ? semanticStepView : 3}
+                onSelectedRunStatusChange={view === 'semantic' ? setSemanticRunStatus : undefined}
+              />
+            ) : null}
           </main>
         </div>
+        <DocsDialog document={openDocument} onClose={() => setOpenDocument(null)} />
       </div>
     </TooltipProvider>
   );
 }
 
-function UploadPanel({ onReview, onBrowseRuns }: { onReview: () => void; onBrowseRuns: () => void }) {
+const isTableMappingFile = (name: string) => /^table-mapping\.(csv|ya?ml)$/i.test(name);
+
+function UploadPanel({
+  migrationMode,
+  onMigrationModeChange,
+  onReview,
+  onBrowseRuns,
+}: {
+  migrationMode: MigrationMode;
+  onMigrationModeChange: (mode: MigrationMode) => void;
+  onReview: () => void;
+  onBrowseRuns: (proposalRunId?: string) => void;
+}) {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [uploads, setUploads] = useState<UploadResponse | null>(null);
   const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
   const [busy, setBusy] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [selectedVolume, setSelectedVolume] = useState('');
-  const [migrationName, setMigrationName] = useState('');
-  const [migrationMode, setMigrationMode] = useState<MigrationMode>('dashboard');
-  const [inputMethod, setInputMethod] = useState<'upload' | 'volume'>('upload');
-  const [datasourcePath, setDatasourcePath] = useState('');
-  const [mappingPath, setMappingPath] = useState('');
+  const [migrationName, setMigrationName] = usePersistentState('migration-name', '', isString);
+  const [inputMethod, setInputMethod] = usePersistentState(
+    'input-method',
+    'upload',
+    isOneOf(['upload', 'volume'] as const)
+  );
+  const [datasourcePath, setDatasourcePath] = usePersistentState('datasource-path', '', isString);
+  const [mappingPath, setMappingPath] = usePersistentState('mapping-path', '', isString);
   const [inspectedInputRoot, setInspectedInputRoot] = useState('');
   const [mappingPreview, setMappingPreview] = useState<{ name: string; content: string } | null>(null);
   const previewRows = useMemo(
     () => (mappingPreview?.name.toLowerCase().endsWith('.csv') ? parseCsv(mappingPreview.content) : []),
     [mappingPreview]
   );
+
+  const migrationNameSynced = useRef(false);
+  const allFiles = uploads?.files ?? [];
+  const modeFiles = allFiles.filter((file) =>
+    migrationMode === 'semantic_model'
+      ? file.kind === 'Tableau datasource' || file.kind === 'Mapping evidence'
+      : file.kind !== 'Tableau datasource'
+  );
+  const hiddenFileCount = allFiles.length - modeFiles.length;
+  const datasourceCount = allFiles.filter((file) => file.kind === 'Tableau datasource').length;
+  const hasTableMapping = allFiles.some((file) => isTableMappingFile(file.name));
+  const readyToProcess =
+    inputMethod === 'volume'
+      ? Boolean(inspectedInputRoot)
+      : migrationMode === 'semantic_model'
+        ? datasourceCount > 0 && hasTableMapping
+        : allFiles.some((file) => file.kind === 'Tableau workbook');
 
   const loadUploads = async () => {
     const query = selectedVolume ? `?volume=${encodeURIComponent(selectedVolume)}` : '';
@@ -655,14 +1098,30 @@ function UploadPanel({ onReview, onBrowseRuns }: { onReview: () => void; onBrows
     if (payload.uploadDestination?.fullName) {
       setSelectedVolume((current) => current || payload.uploadDestination?.fullName || '');
     }
+    if (!migrationNameSynced.current) {
+      // Reconcile the remembered name with the server's active migration once per page load.
+      migrationNameSynced.current = true;
+      const rememberedName = readPersistedValue('migration-name', '', isString);
+      if (
+        rememberedName &&
+        payload.migrationName &&
+        rememberedName !== payload.migrationName &&
+        payload.processing?.status !== 'running'
+      ) {
+        await applyMigrationName(rememberedName);
+        return;
+      }
+      setMigrationName(payload.migrationName || rememberedName);
+      return;
+    }
     setMigrationName((current) => current || payload.migrationName || '');
   };
 
-  const applyMigrationName = async () => {
+  const applyMigrationName = async (name: string = migrationName) => {
     const response = await fetch('/api/migration-context', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ name: migrationName, mode: migrationMode }),
+      body: JSON.stringify({ name, mode: migrationMode }),
     });
     const payload = (await response.json()) as { name?: string; error?: string };
     if (!response.ok || !payload.name) {
@@ -692,6 +1151,11 @@ function UploadPanel({ onReview, onBrowseRuns }: { onReview: () => void; onBrows
       setBusy(false);
     }
   };
+
+  useEffect(() => {
+    // Re-validate restored Volume paths so a returning user can start without re-entering them.
+    if (inputMethod === 'volume' && datasourcePath && mappingPath) void inspectVolumeInputs();
+  }, []);
 
   useEffect(() => {
     void loadUploads();
@@ -792,14 +1256,14 @@ function UploadPanel({ onReview, onBrowseRuns }: { onReview: () => void; onBrows
               value={migrationMode}
               onChange={(event) => {
                 const nextMode = event.target.value as MigrationMode;
-                setMigrationMode(nextMode);
+                onMigrationModeChange(nextMode);
                 if (nextMode === 'dashboard') setInputMethod('upload');
                 setSelectedFiles([]);
                 setInspectedInputRoot('');
               }}
             >
               <option value="semantic_model">Migrate semantic model only</option>
-              <option value="dashboard">Migrate dashboards</option>
+              {DASHBOARD_MIGRATION_ENABLED ? <option value="dashboard">Migrate dashboards</option> : null}
             </select>
             <small>
               {migrationMode === 'semantic_model'
@@ -823,6 +1287,31 @@ function UploadPanel({ onReview, onBrowseRuns }: { onReview: () => void; onBrows
           </label>
         </div>
         {inputMethod === 'upload' ? (
+          <div className="upload-destination">
+            <label>
+              Migration name
+              <span className="upload-destination__name">
+                <input
+                  value={migrationName}
+                  onChange={(event) => setMigrationName(event.target.value)}
+                  onBlur={() => {
+                    if (migrationName.trim() && migrationName !== uploads?.migrationName) void applyMigrationName();
+                  }}
+                  placeholder="superstore-migration"
+                />
+              </span>
+            </label>
+            <div className="upload-destination__path">
+              <span>Uploads go to</span>
+              <code>
+                {selectedVolume
+                  ? `/Volumes/${selectedVolume.split('.').join('/')}/bi-migrations/${migrationName || 'migration-name'}/`
+                  : 'Loading authorized Volume…'}
+              </code>
+            </div>
+          </div>
+        ) : null}
+        {inputMethod === 'upload' ? (
           <div className="upload-dropzone">
             <label htmlFor="tableau-files">
               {migrationMode === 'semantic_model'
@@ -837,6 +1326,7 @@ function UploadPanel({ onReview, onBrowseRuns }: { onReview: () => void; onBrows
             <input
               ref={fileInputRef}
               id="tableau-files"
+              hidden
               type="file"
               accept={
                 migrationMode === 'semantic_model'
@@ -862,11 +1352,16 @@ function UploadPanel({ onReview, onBrowseRuns }: { onReview: () => void; onBrows
               <Button variant="outline" onClick={() => fileInputRef.current?.click()} disabled={busy}>
                 Choose files
               </Button>
+              {selectedFiles.length > 0 ? (
+                <Button onClick={() => void uploadFiles()} disabled={busy || !selectedVolume}>
+                  {busy
+                    ? 'Uploading…'
+                    : `Upload ${selectedFiles.length} ${selectedFiles.length === 1 ? 'file' : 'files'}`}
+                </Button>
+              ) : null}
             </div>
-            {selectedFiles.length > 0 ? (
-              <p className="upload-action-hint">
-                {selectedFiles.length} {selectedFiles.length === 1 ? 'file' : 'files'} selected
-              </p>
+            {selectedFiles.length > 0 && !selectedVolume ? (
+              <p className="upload-action-hint">Waiting for the authorized Volume before uploading.</p>
             ) : null}
           </div>
         ) : (
@@ -875,18 +1370,21 @@ function UploadPanel({ onReview, onBrowseRuns }: { onReview: () => void; onBrows
               <FolderSearch className="size-5" aria-hidden="true" />
               <div>
                 <h3>Use existing Unity Catalog files</h3>
-                <p>Paste the full Volume paths. Both folders must share one parent input directory.</p>
+                <p>
+                  Paste the input folder (or its datasources subfolder) and the mapping file. Both must be in the same
+                  input folder.
+                </p>
               </div>
             </div>
             <label>
-              Tableau datasource folder
+              Input folder or datasources folder
               <input
                 value={datasourcePath}
                 onChange={(event) => {
                   setDatasourcePath(event.target.value);
                   setInspectedInputRoot('');
                 }}
-                placeholder="/Volumes/catalog/schema/volume/project/datasources"
+                placeholder="/Volumes/catalog/schema/volume/project"
               />
             </label>
             <label>
@@ -923,11 +1421,22 @@ function UploadPanel({ onReview, onBrowseRuns }: { onReview: () => void; onBrows
           <>
             <div className="upload-status">
               <div>
-                <h3>Landing inventory</h3>
-                <p>{uploads?.storage ?? 'Loading storage status…'}</p>
+                <h3>Files in this migration</h3>
+                {hiddenFileCount > 0 ? (
+                  <p>
+                    {hiddenFileCount} {hiddenFileCount === 1 ? 'file is' : 'files are'} hidden because{' '}
+                    {hiddenFileCount === 1 ? 'it is' : 'they are'} only used by{' '}
+                    {migrationMode === 'semantic_model'
+                      ? DASHBOARD_MIGRATION_ENABLED
+                        ? 'Migrate dashboards'
+                        : 'dashboard migration, which is temporarily unavailable'
+                      : 'Migrate semantic model only'}
+                    .
+                  </p>
+                ) : null}
               </div>
               <Badge variant="outline">
-                {uploads?.files.length ?? 0} uploaded
+                {modeFiles.length} uploaded
                 {selectedFiles.length > 0 ? ` · ${selectedFiles.length} selected` : ''}
               </Badge>
             </div>
@@ -941,7 +1450,10 @@ function UploadPanel({ onReview, onBrowseRuns }: { onReview: () => void; onBrows
                   <span>{(file.size / 1024).toFixed(1)} KB</span>
                 </div>
               ))}
-              {uploads?.files.map((file) => (
+              {modeFiles.length === 0 && selectedFiles.length === 0 ? (
+                <p className="upload-file-list__empty">No files uploaded for this migration yet.</p>
+              ) : null}
+              {modeFiles.map((file) => (
                 <div className="upload-file" key={file.name}>
                   <span>
                     {file.kind === 'Mapping evidence' ? (
@@ -956,7 +1468,18 @@ function UploadPanel({ onReview, onBrowseRuns }: { onReview: () => void; onBrows
                       <strong>{file.name}</strong>
                     )}
                     <small>{file.kind}</small>
-                    {file.volumePath ? <small className="upload-volume-path">{file.volumePath}</small> : null}
+                    {migrationMode === 'semantic_model' &&
+                    file.kind === 'Mapping evidence' &&
+                    !isTableMappingFile(file.name) ? (
+                      <small className="upload-file__warning">
+                        Not used: the workflow reads only table-mapping.yaml, .yml, or .csv.
+                      </small>
+                    ) : null}
+                    {file.volumePath ? (
+                      <small className="upload-volume-path" title={file.volumePath}>
+                        {file.volumePath}
+                      </small>
+                    ) : null}
                   </span>
                   <span>{(file.sizeBytes / 1024).toFixed(1)} KB</span>
                 </div>
@@ -999,80 +1522,57 @@ function UploadPanel({ onReview, onBrowseRuns }: { onReview: () => void; onBrows
                 </DialogFooter>
               </DialogContent>
             </Dialog>
-            <div>
-              <h3>Detected target namespaces</h3>
-              <p className="mapping-source-note">
-                Fully qualified Databricks tables are detected from uploaded mappings. Change the selection only to
-                inspect an additional scope.
-              </p>
-              {uploads?.detectedNamespaces.length ? (
-                <div className="detected-namespaces" aria-label="Detected Databricks scopes">
-                  {uploads.detectedNamespaces.map((namespace) => (
-                    <Badge variant="outline" key={`${namespace.catalog}.${namespace.schema}`}>
-                      {namespace.catalog}.{namespace.schema}
-                    </Badge>
-                  ))}
-                </div>
-              ) : (
-                <p className="mapping-source-note">No Databricks scope detected from the uploaded files yet.</p>
-              )}
-            </div>
-            <div className="namespace-picker">
-              <div className="namespace-picker__heading">
-                <h3>Upload destination</h3>
-                <p>The app uploads assets to its authorized Unity Catalog Volume.</p>
+            {migrationMode === 'dashboard' ? (
+              <div>
+                <h3>Detected target namespaces</h3>
+                <p className="mapping-source-note">
+                  Fully qualified Databricks tables are detected from uploaded mappings. Change the selection only to
+                  inspect an additional scope.
+                </p>
+                {uploads?.detectedNamespaces.length ? (
+                  <div className="detected-namespaces" aria-label="Detected Databricks scopes">
+                    {uploads.detectedNamespaces.map((namespace) => (
+                      <Badge variant="outline" key={`${namespace.catalog}.${namespace.schema}`}>
+                        {namespace.catalog}.{namespace.schema}
+                      </Badge>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="mapping-source-note">No Databricks scope detected from the uploaded files yet.</p>
+                )}
               </div>
-              <label>
-                Volume
-                <select value={selectedVolume} disabled={!selectedVolume}>
-                  <option value="">Loading authorized Volume…</option>
-                  {selectedVolume ? <option value={selectedVolume}>{selectedVolume}</option> : null}
-                </select>
-              </label>
-              <label>
-                Migration name
-                <input value={migrationName} onChange={(event) => setMigrationName(event.target.value)} />
-              </label>
-              <Button variant="outline" onClick={() => void applyMigrationName()} disabled={!migrationName.trim()}>
-                Use migration
-              </Button>
-            </div>
-            <div className="upload-destination-action">
-              <Button
-                onClick={() => void uploadFiles()}
-                disabled={busy || selectedFiles.length === 0 || !selectedVolume}
-              >
-                {busy
-                  ? 'Uploading…'
-                  : selectedFiles.length > 0
-                    ? `Upload ${selectedFiles.length} ${selectedFiles.length === 1 ? 'file' : 'files'}`
-                    : 'Upload files'}
-              </Button>
-              {selectedFiles.length > 0 && !selectedVolume ? (
-                <span>Choose a Volume to enable upload.</span>
-              ) : selectedVolume ? (
-                <span>
-                  Destination: /Volumes/{selectedVolume.split('.').join('/')}/bi-migrations/
-                  {migrationName || 'migration-name'}/
-                </span>
-              ) : null}
-            </div>
+            ) : null}
           </>
+        ) : null}
+        {migrationMode === 'semantic_model' && inputMethod === 'upload' ? (
+          <ul className="readiness-checklist" aria-label="Ready to propose semantic groups">
+            <li className={datasourceCount > 0 ? 'readiness-checklist__done' : undefined}>
+              {datasourceCount > 0 ? <CheckCircle2 aria-hidden="true" /> : <AlertCircle aria-hidden="true" />}
+              {datasourceCount > 0
+                ? `${datasourceCount} Tableau ${datasourceCount === 1 ? 'datasource' : 'datasources'} (.tds/.tdsx)`
+                : 'Upload at least one .tds or .tdsx datasource'}
+            </li>
+            <li className={hasTableMapping ? 'readiness-checklist__done' : undefined}>
+              {hasTableMapping ? <CheckCircle2 aria-hidden="true" /> : <AlertCircle aria-hidden="true" />}
+              {hasTableMapping
+                ? 'Table mapping file'
+                : 'Upload a mapping named table-mapping.yaml, table-mapping.yml, or table-mapping.csv'}
+            </li>
+          </ul>
         ) : null}
         <div className="upload-actions">
           <Button
-            variant="outline"
             onClick={() => void processUploads()}
-            disabled={
-              busy ||
-              (inputMethod === 'upload' ? !uploads?.files.length : !inspectedInputRoot) ||
-              uploads?.processing.status === 'running'
-            }
+            disabled={busy || !readyToProcess || uploads?.processing.status === 'running'}
           >
             {migrationMode === 'semantic_model' ? 'Propose semantic groups' : 'Run inventory'}
           </Button>
           <span>
-            {uploads?.processing.message || 'Upload files, then run inventory and grouping.'}
+            {!uploads || uploads.processing.status === 'idle'
+              ? migrationMode === 'semantic_model'
+                ? 'Starts the Propose semantic groups Job. You review the proposed groups in step 2; nothing is created yet.'
+                : 'Starts the inventory Job, then you review groups and mappings.'
+              : uploads.processing.message}
             {uploads?.processing.runUrl ? (
               <>
                 {' '}
@@ -1085,7 +1585,11 @@ function UploadPanel({ onReview, onBrowseRuns }: { onReview: () => void; onBrows
           </span>
           {uploads?.processing.status === 'complete' ? (
             migrationMode === 'semantic_model' ? (
-              <Button onClick={onBrowseRuns}>Review semantic run</Button>
+              <Button
+                onClick={() => onBrowseRuns(uploads.processing.runId ? String(uploads.processing.runId) : undefined)}
+              >
+                Review semantic run
+              </Button>
             ) : (
               <Button onClick={onReview}>Review groups</Button>
             )
@@ -1096,19 +1600,44 @@ function UploadPanel({ onReview, onBrowseRuns }: { onReview: () => void; onBrows
   );
 }
 
-function SemanticRunBrowser({ sessionUser }: { sessionUser: { displayName: string; userName: string } | null }) {
+type RunFocus = { runId?: string; preferPending?: boolean; nonce: number };
+
+function SemanticRunBrowser({
+  sessionUser,
+  focus,
+  stage = 3,
+  onSelectedRunStatusChange,
+}: {
+  sessionUser: { displayName: string; userName: string } | null;
+  focus?: RunFocus;
+  stage?: 2 | 3;
+  onSelectedRunStatusChange?: (status: string | null) => void;
+}) {
   const [root, setRoot] = useState('');
   const [runs, setRuns] = useState<SemanticRun[]>([]);
-  const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
+  const [selectedRunId, setSelectedRunId] = usePersistentState<string | null>(
+    'semantic-run-id',
+    null,
+    (value): value is string | null => value === null || isString(value)
+  );
   const [selectedGroupId, setSelectedGroupId] = useState<string | null>(null);
   const [groupReview, setGroupReview] = useState<SemanticGroupReview | null>(null);
   const [loadingRuns, setLoadingRuns] = useState(true);
   const [loadingGroup, setLoadingGroup] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
-  const [migrationRun, setMigrationRun] = useState<{ runId: number; runUrl?: string | null } | null>(null);
+  const [migrationRun, setMigrationRun] = useState<{
+    proposalRunId: string;
+    runId: number;
+    runUrl?: string | null;
+    approval?: 'pending' | 'approved' | 'rejected';
+    approvalError?: string | null;
+    lifeCycleState?: string;
+    resultState?: string;
+  } | null>(null);
+  const [submitting, setSubmitting] = useState(false);
 
-  const loadRuns = async (requestedRoot?: string) => {
-    setLoadingRuns(true);
+  const loadRuns = async (requestedRoot?: string, options: { quiet?: boolean } = {}) => {
+    if (!options.quiet) setLoadingRuns(true);
     setActionError(null);
     try {
       const query = requestedRoot ? `?root=${encodeURIComponent(requestedRoot)}` : '';
@@ -1116,11 +1645,13 @@ function SemanticRunBrowser({ sessionUser }: { sessionUser: { displayName: strin
       const payload = (await response.json()) as SemanticRunsResponse;
       if (!response.ok) throw new Error([payload.error, payload.detail].filter(Boolean).join(' '));
       setRoot(payload.root);
+      writePersistedValue('semantic-output-root', payload.root);
       setRuns(payload.runs ?? []);
       setSelectedRunId((current) =>
         current && payload.runs.some((run) => run.runId === current) ? current : (payload.runs[0]?.runId ?? null)
       );
     } catch (error) {
+      if (requestedRoot) setRoot(requestedRoot);
       setActionError(error instanceof Error ? error.message : 'Could not load semantic workflow runs.');
       setRuns([]);
     } finally {
@@ -1129,10 +1660,39 @@ function SemanticRunBrowser({ sessionUser }: { sessionUser: { displayName: strin
   };
 
   useEffect(() => {
-    void loadRuns();
+    void loadRuns(readPersistedValue('semantic-output-root', '', isString) || undefined);
   }, []);
 
+  // Apply a navigation request: the just-proposed run, else the newest run awaiting approval.
+  const appliedFocusNonce = useRef<number | null>(null);
+  useEffect(() => {
+    if (!focus || runs.length === 0 || (!focus.runId && !focus.preferPending)) return;
+    if (appliedFocusNonce.current === focus.nonce) return;
+    appliedFocusNonce.current = focus.nonce;
+    const requested = focus.runId ? runs.find((run) => run.runId === focus.runId) : undefined;
+    const pending = runs.find((run) => !run.supersededBy && PENDING_APPROVAL_STATUSES.has(run.status));
+    const target = requested ?? (focus.preferPending ? pending : undefined);
+    if (target) setSelectedRunId(target.runId);
+  }, [focus?.nonce, runs]);
+
   const selectedRun = useMemo(() => runs.find((run) => run.runId === selectedRunId) ?? null, [runs, selectedRunId]);
+  // Changes when the selected group's result lands, so its detail panel reloads during migration.
+  const selectedGroupResult =
+    selectedRun?.groups.find((group) => group.group_id === selectedGroupId)?.gateStatus ?? null;
+
+  // While a run is migrating, refresh so each group's badge flips as its result lands.
+  const selectedRunMigrating = Boolean(selectedRun && MIGRATION_RUNNING_STATUSES.has(selectedRun.status));
+  useEffect(() => {
+    if (!selectedRunMigrating || !root) return;
+    const timer = window.setInterval(() => void loadRuns(root, { quiet: true }), 30000);
+    return () => window.clearInterval(timer);
+  }, [selectedRunMigrating, root]);
+
+  useEffect(() => {
+    const submitted =
+      migrationRun && migrationRun.proposalRunId === selectedRun?.runId && migrationRun.approval !== 'rejected';
+    onSelectedRunStatusChange?.(submitted ? 'MIGRATION_SUBMITTED' : (selectedRun?.status ?? null));
+  }, [selectedRun?.status, selectedRun?.runId, migrationRun]);
 
   useEffect(() => {
     const groups = selectedRun?.groups ?? [];
@@ -1146,6 +1706,8 @@ function SemanticRunBrowser({ sessionUser }: { sessionUser: { displayName: strin
       setGroupReview(null);
       return;
     }
+    // Wait until the group selection belongs to the selected run (avoids a stale run/group pair).
+    if (!selectedRun?.groups.some((group) => group.group_id === selectedGroupId)) return;
     const loadGroup = async () => {
       setLoadingGroup(true);
       setActionError(null);
@@ -1164,53 +1726,110 @@ function SemanticRunBrowser({ sessionUser }: { sessionUser: { displayName: strin
       }
     };
     void loadGroup();
-  }, [root, selectedRunId, selectedGroupId]);
+  }, [root, selectedRunId, selectedGroupId, selectedGroupResult]);
 
   const startMigration = async () => {
-    if (!selectedRunId) return;
+    if (!selectedRunId || submitting) return;
+    setSubmitting(true);
     setActionError(null);
-    const response = await fetch(`/api/semantic-runs/${selectedRunId}/migrate`, { method: 'POST' });
-    const payload = (await response.json()) as { runId?: number; runUrl?: string | null; error?: string };
-    if (!response.ok || !payload.runId) {
-      setActionError(payload.error ?? 'Could not start semantic migration.');
-      return;
+    try {
+      const response = await fetch(`/api/semantic-runs/${selectedRunId}/migrate`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ root }),
+      });
+      const payload = (await response.json()) as { runId?: number; runUrl?: string | null; error?: string };
+      if (!response.ok || !payload.runId) throw new Error(payload.error ?? 'Could not start semantic migration.');
+      setMigrationRun({
+        proposalRunId: selectedRunId,
+        runId: payload.runId,
+        runUrl: payload.runUrl,
+        approval: 'pending',
+      });
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : 'Could not start semantic migration.');
+    } finally {
+      setSubmitting(false);
     }
-    setMigrationRun({ runId: payload.runId, runUrl: payload.runUrl });
   };
 
+  const migrationRunId = migrationRun?.runId;
+  const migrationFinished = migrationRun?.lifeCycleState === 'TERMINATED' || migrationRun?.approval === 'rejected';
+  useEffect(() => {
+    if (!migrationRunId || migrationFinished) return;
+    let cancelled = false;
+    const check = async () => {
+      const response = await fetch(`/api/semantic-migrations/${migrationRunId}`);
+      if (!response.ok || cancelled) return;
+      const status = (await response.json()) as {
+        approval: 'pending' | 'approved' | 'rejected';
+        approvalError: string | null;
+        lifeCycleState: string;
+        resultState: string;
+      };
+      setMigrationRun((current) => {
+        if (!current || current.runId !== migrationRunId) return current;
+        if (current.approval !== 'approved' && status.approval === 'approved') void loadRuns(root);
+        return { ...current, ...status };
+      });
+    };
+    void check();
+    const timer = window.setInterval(() => void check(), 10000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [migrationRunId, migrationFinished]);
+
+  const migrationForSelectedRun = migrationRun && migrationRun.proposalRunId === selectedRunId ? migrationRun : null;
+  const selectedRunStatus = selectedRun?.supersededBy ? 'SUPERSEDED' : selectedRun?.status;
+  const awaitingApproval = Boolean(
+    selectedRun && !selectedRun.supersededBy && PENDING_APPROVAL_STATUSES.has(selectedRun.status)
+  );
+
   return (
-    <section className="run-browser" aria-label="Previous semantic migration runs">
+    <section className="run-browser" aria-label="Semantic migration runs">
       <Card className="workspace-card run-browser__header">
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2">
-            <History className="size-5" aria-hidden="true" />
-            Previous semantic migrations
-          </CardTitle>
-        </CardHeader>
         <CardContent className="run-browser__controls">
-          <label>
-            Workflow output folder
-            <input
-              value={root}
-              onChange={(event) => setRoot(event.target.value)}
-              placeholder="/Volumes/catalog/schema/volume/semantic_workflows"
-            />
+          <div className="run-browser__volume-row">
+            <label>
+              Workflow output folder
+              <input
+                value={root}
+                onChange={(event) => setRoot(event.target.value)}
+                placeholder="/Volumes/catalog/schema/volume/semantic_workflows"
+              />
+            </label>
+            <Button
+              variant="outline"
+              onClick={() => void loadRuns(root)}
+              disabled={loadingRuns || !root.startsWith('/Volumes/')}
+            >
+              {loadingRuns ? 'Loading…' : 'Load runs'}
+            </Button>
+          </div>
+          <label className="run-browser__run-select">
+            Run
+            <select
+              value={selectedRunId ?? ''}
+              onChange={(event) => setSelectedRunId(event.target.value || null)}
+              disabled={loadingRuns || runs.length === 0}
+            >
+              {runs.length === 0 ? <option value="">No retained runs</option> : null}
+              {runs.map((run) => (
+                <option key={run.runId} value={run.runId}>
+                  {run.runFolder} · {statusLabel(run.supersededBy ? 'SUPERSEDED' : run.status)}
+                </option>
+              ))}
+            </select>
           </label>
-          <Button
-            variant="outline"
-            onClick={() => void loadRuns(root)}
-            disabled={loadingRuns || !root.startsWith('/Volumes/')}
-          >
-            {loadingRuns ? 'Loading…' : 'Load runs'}
-          </Button>
-          <p>Choose any retained run folder to reopen its groups, migration review, and latest repair report.</p>
         </CardContent>
       </Card>
 
       {actionError ? (
         <Alert variant="destructive">
           <AlertCircle className="size-4" />
-          <AlertTitle>Run data unavailable</AlertTitle>
+          <AlertTitle>Action failed</AlertTitle>
           <AlertDescription>{actionError}</AlertDescription>
         </Alert>
       ) : null}
@@ -1224,79 +1843,132 @@ function SemanticRunBrowser({ sessionUser }: { sessionUser: { displayName: strin
       ) : null}
       {!loadingRuns && runs.length > 0 ? (
         <div className="run-browser__workspace">
-          <Card className="workspace-card run-list-card">
-            <CardHeader>
-              <CardTitle>Run folders</CardTitle>
-            </CardHeader>
-            <CardContent className="run-list">
-              {runs.map((run) => (
-                <button
-                  type="button"
-                  key={run.runId}
-                  className={run.runId === selectedRunId ? 'run-list__item run-list__item--selected' : 'run-list__item'}
-                  onClick={() => setSelectedRunId(run.runId)}
-                >
-                  <span>
-                    <strong>{run.runId}</strong>
-                    <small>{run.createdAt ? new Date(run.createdAt).toLocaleString() : 'Timestamp unavailable'}</small>
-                  </span>
-                  <Badge variant="outline">{run.status.replaceAll('_', ' ')}</Badge>
-                  <small>
-                    {run.groups.length} group{run.groups.length === 1 ? '' : 's'}
-                  </small>
-                </button>
-              ))}
-            </CardContent>
-          </Card>
-
-          <div className="run-browser__detail">
+          <aside className="run-browser__sidebar" aria-label="Selected run">
             {selectedRun ? (
               <Card className="workspace-card run-summary-card">
                 <CardHeader>
-                  <CardTitle>Run {selectedRun.runId}</CardTitle>
+                  <div className="run-summary-heading">
+                    <CardTitle>Run {selectedRun.runId}</CardTitle>
+                    <StatusBadge status={selectedRunStatus} />
+                  </div>
                 </CardHeader>
-                <CardContent>
+                <CardContent className="run-summary-content">
                   <p>{selectedRun.headline}</p>
-                  <dl className="run-summary-grid">
+                  <dl className="run-summary-list">
                     <div>
-                      <dt>Status</dt>
-                      <dd>{selectedRun.status.replaceAll('_', ' ')}</dd>
-                    </div>
-                    <div>
-                      <dt>Semantic groups</dt>
-                      <dd>{selectedRun.groups.length}</dd>
-                    </div>
-                    <div>
-                      <dt>Input</dt>
-                      <dd title={selectedRun.inputVolumePath ?? undefined}>
-                        {selectedRun.inputVolumePath ?? 'Unavailable'}
+                      <dt>Started</dt>
+                      <dd>
+                        {selectedRun.createdAt ? new Date(selectedRun.createdAt).toLocaleString() : 'Unavailable'}
                       </dd>
                     </div>
                     <div>
-                      <dt>Report</dt>
-                      <dd title={selectedRun.reportPath}>{selectedRun.reportPath}</dd>
+                      <dt>Input</dt>
+                      <dd>
+                        <code>{selectedRun.inputVolumePath ?? 'Unavailable'}</code>
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>Run folder</dt>
+                      <dd>
+                        <code>{selectedRun.runFolder}</code>
+                      </dd>
                     </div>
                   </dl>
-                  {selectedRun.status === 'GROUPING_REVIEW_REQUIRED' || selectedRun.status === 'AWAITING_APPROVAL' ? (
-                    <div className="run-migration-action">
-                      <Button onClick={() => void startMigration()}>
-                        <Play className="size-4" aria-hidden="true" />
-                        Migrate proposed groups
-                      </Button>
-                      <span>Approval is attributed to {sessionUser?.displayName ?? 'the signed-in user'}.</span>
+                  {selectedRun.supersededBy ? (
+                    <div className="run-next-step run-next-step--muted">
+                      <strong>Superseded</strong>
+                      <p>
+                        A newer proposal exists for the same input: <code>{selectedRun.supersededBy}</code>. Review and
+                        approve that run instead.
+                      </p>
                     </div>
                   ) : null}
-                  {migrationRun ? (
-                    <Alert>
-                      <CheckCircle2 className="size-4" />
-                      <AlertTitle>Semantic migration submitted</AlertTitle>
+                  {selectedRun.approval && !migrationForSelectedRun ? (
+                    <div className="run-next-step run-next-step--done">
+                      <strong>Approved</strong>
+                      <p>
+                        By {selectedRun.approval.approvedBy ?? 'unknown'}
+                        {selectedRun.approval.approvedAt
+                          ? ` on ${new Date(selectedRun.approval.approvedAt).toLocaleString()}`
+                          : ''}
+                        .
+                      </p>
+                      {selectedRun.approval.migrationRunId ? (
+                        <small>
+                          Migration run {selectedRun.approval.migrationRunId}{' '}
+                          {selectedRun.approval.migrationRunUrl ? (
+                            <a
+                              className="job-run-link"
+                              href={selectedRun.approval.migrationRunUrl}
+                              target="_blank"
+                              rel="noreferrer"
+                            >
+                              View Job run <ExternalLink aria-hidden="true" />
+                            </a>
+                          ) : null}
+                        </small>
+                      ) : null}
+                    </div>
+                  ) : null}
+                  {stage === 3 && awaitingApproval && !migrationForSelectedRun ? (
+                    <div className="run-next-step run-next-step--muted">
+                      <strong>Not approved yet</strong>
+                      <p>Metric Views are built after approval. Open step 2 to review and approve this run.</p>
+                    </div>
+                  ) : null}
+                  {stage === 2 &&
+                  awaitingApproval &&
+                  (!migrationForSelectedRun || migrationForSelectedRun.approval === 'rejected') ? (
+                    <div className="run-next-step">
+                      <strong>Next step: approve</strong>
+                      <p>
+                        Check each group&apos;s datasources and target tables, then approve. This starts the Migrate
+                        approved semantic groups Job for exactly this run.
+                      </p>
+                      <Button onClick={() => void startMigration()} disabled={submitting}>
+                        <Play className="size-4" aria-hidden="true" />
+                        {submitting
+                          ? 'Starting…'
+                          : `Approve and migrate ${selectedRun.groups.length} ${
+                              selectedRun.groups.length === 1 ? 'group' : 'groups'
+                            }`}
+                      </Button>
+                      <small>Approval is recorded as {sessionUser?.displayName ?? 'the signed-in user'}.</small>
+                    </div>
+                  ) : null}
+                  {migrationForSelectedRun ? (
+                    <Alert variant={migrationForSelectedRun.approval === 'rejected' ? 'destructive' : 'default'}>
+                      {migrationForSelectedRun.approval === 'rejected' ? (
+                        <AlertCircle className="size-4" />
+                      ) : (
+                        <CheckCircle2 className="size-4" />
+                      )}
+                      <AlertTitle>
+                        {migrationForSelectedRun.approval === 'rejected'
+                          ? 'Approval rejected'
+                          : migrationForSelectedRun.approval === 'approved'
+                            ? migrationForSelectedRun.lifeCycleState === 'TERMINATED'
+                              ? `Migration finished: ${statusLabel(migrationForSelectedRun.resultState)}`
+                              : 'Approved: migrating groups'
+                            : 'Checking approval…'}
+                      </AlertTitle>
                       <AlertDescription>
-                        Run {migrationRun.runId}{' '}
-                        {migrationRun.runUrl ? (
-                          <a className="job-run-link" href={migrationRun.runUrl} target="_blank" rel="noreferrer">
-                            View Job run <ExternalLink aria-hidden="true" />
-                          </a>
+                        {migrationForSelectedRun.approvalError ? (
+                          <span className="migration-run-error">{migrationForSelectedRun.approvalError}</span>
                         ) : null}
+                        <span>
+                          Migration run {migrationForSelectedRun.runId}{' '}
+                          {migrationForSelectedRun.runUrl ? (
+                            <a
+                              className="job-run-link"
+                              href={migrationForSelectedRun.runUrl}
+                              target="_blank"
+                              rel="noreferrer"
+                            >
+                              View Job run <ExternalLink aria-hidden="true" />
+                            </a>
+                          ) : null}
+                        </span>
                       </AlertDescription>
                     </Alert>
                   ) : null}
@@ -1307,13 +1979,14 @@ function SemanticRunBrowser({ sessionUser }: { sessionUser: { displayName: strin
             {selectedRun?.groups.length ? (
               <Card className="workspace-card">
                 <CardHeader>
-                  <CardTitle>Semantic groups</CardTitle>
+                  <CardTitle>Semantic groups · {selectedRun.groups.length}</CardTitle>
                 </CardHeader>
                 <CardContent className="semantic-run-groups">
                   {selectedRun.groups.map((group) => (
                     <button
                       type="button"
                       key={group.group_id}
+                      aria-pressed={group.group_id === selectedGroupId}
                       className={
                         group.group_id === selectedGroupId
                           ? 'semantic-run-group semantic-run-group--selected'
@@ -1321,19 +1994,33 @@ function SemanticRunBrowser({ sessionUser }: { sessionUser: { displayName: strin
                       }
                       onClick={() => setSelectedGroupId(group.group_id)}
                     >
-                      <span>
+                      <span className="semantic-run-group__title">
                         <strong>{group.display_name}</strong>
-                        <small>{group.candidate_metric_view_fqn ?? 'Candidate not created'}</small>
+                        <StatusBadge status={groupDisplayStatus(group, selectedRun.status)} />
                       </span>
-                      <Badge variant="outline">{group.readiness ?? group.status.replaceAll('_', ' ')}</Badge>
+                      <small title={group.candidate_metric_view_fqn ?? undefined}>
+                        {group.candidate_metric_view_fqn?.split('.').pop() ?? 'Candidate not created'}
+                      </small>
                     </button>
                   ))}
                 </CardContent>
               </Card>
             ) : null}
+          </aside>
 
+          <div className="run-browser__detail">
             {loadingGroup ? <DetailLoadingState /> : null}
-            {!loadingGroup && groupReview ? <SemanticGroupReviewPanel review={groupReview} /> : null}
+            {!loadingGroup && groupReview ? (
+              <SemanticGroupReviewPanel
+                review={groupReview}
+                awaitingApproval={awaitingApproval}
+                showResults={stage === 3 && !awaitingApproval}
+                inProgress={groupDisplayStatus(groupReview.group, selectedRun?.status) === 'MIGRATION_IN_PROGRESS'}
+              />
+            ) : null}
+            {!loadingGroup && !groupReview && selectedRun && selectedRun.groups.length === 0 ? (
+              <EmptyMessage title="No groups yet" description="This run has not produced semantic groups." />
+            ) : null}
           </div>
         </div>
       ) : null}
@@ -1341,19 +2028,96 @@ function SemanticRunBrowser({ sessionUser }: { sessionUser: { displayName: strin
   );
 }
 
-function SemanticGroupReviewPanel({ review }: { review: SemanticGroupReview }) {
+function StatusBadge({ status }: { status: string | null | undefined }) {
+  return (
+    <Badge variant="outline" className={`status-badge status-badge--${statusTone(status)}`}>
+      {statusLabel(status)}
+    </Badge>
+  );
+}
+
+function GroupMembership({ summary }: { summary: SemanticGroupReview['sourceSummary'] }) {
+  const fileName = (sourcePath?: string) => sourcePath?.split('/').pop() ?? '';
+  const rows = [
+    ...(summary?.datasources ?? []).map((item) => ({ ...item, role: 'Primary' })),
+    ...(summary?.supporting_datasources ?? []).map((item) => ({ ...item, role: 'Supporting' })),
+  ];
+  if (!rows.length && !summary?.target_tables?.length) return null;
+  return (
+    <div className="group-membership">
+      <h4>Proposed membership</h4>
+      {rows.length ? (
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead>Tableau datasource</TableHead>
+              <TableHead>File</TableHead>
+              <TableHead>Role</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {rows.map((item) => (
+              <TableRow key={`${item.role}-${item.source_path ?? item.datasource_name}`}>
+                <TableCell>{item.datasource_name ?? 'Unnamed datasource'}</TableCell>
+                <TableCell>
+                  <code>{fileName(item.source_path)}</code>
+                </TableCell>
+                <TableCell>{item.role}</TableCell>
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
+      ) : null}
+      {summary?.target_tables?.length ? (
+        <div className="group-membership__targets">
+          <span>Databricks target tables</span>
+          <div className="action-names">
+            {summary.target_tables.map((table) => (
+              <span key={table}>{table}</span>
+            ))}
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function SemanticGroupReviewPanel({
+  review,
+  awaitingApproval = false,
+  showResults = true,
+  inProgress = false,
+}: {
+  review: SemanticGroupReview;
+  awaitingApproval?: boolean;
+  showResults?: boolean;
+  inProgress?: boolean;
+}) {
   const migration = review.migrationReview;
   const repair = review.repairReview;
   const gates = repair?.coverage_gates ?? [];
+  const [openReport, setOpenReport] = useState<'migration' | 'repair' | null>(null);
+  const reportHtml =
+    openReport === 'migration' ? review.reports?.migrationReviewHtml : review.reports?.repairReviewHtml;
+  const reportTitle = openReport === 'migration' ? 'Semantic migration review' : 'Metric View repair report';
   return (
     <div className="semantic-review-stack">
-      <Card className="workspace-card">
+      <Card className="workspace-card semantic-group-overview-card">
         <CardHeader>
-          <CardTitle>{review.group.display_name}</CardTitle>
+          <div className="semantic-group-overview-heading">
+            <span>Selected semantic group</span>
+            <CardTitle>{review.group.display_name}</CardTitle>
+          </div>
         </CardHeader>
         <CardContent className="semantic-review-section">
           <p>{review.sourceSummary?.grouping_rationale ?? 'Grouping rationale is unavailable.'}</p>
-          <div className="review-kpis">
+          <GroupMembership summary={review.sourceSummary} />
+          {awaitingApproval ? (
+            <p className="approval-hint">
+              The candidate Metric View is built and evaluated after you approve this proposal.
+            </p>
+          ) : null}
+          <div className="review-kpis" hidden={!showResults}>
             <div>
               <span>Datasources</span>
               <strong>{review.sourceSummary?.datasource_count ?? '—'}</strong>
@@ -1377,120 +2141,226 @@ function SemanticGroupReviewPanel({ review }: { review: SemanticGroupReview }) {
           </div>
           <div className="artifact-path">
             <span>Candidate Metric View</span>
-            <code>
-              {migration?.candidate?.metric_view_fqn ?? review.group.candidate_metric_view_fqn ?? 'Not created'}
-            </code>
-          </div>
-        </CardContent>
-      </Card>
-
-      <Card className="workspace-card">
-        <CardHeader>
-          <CardTitle>Migration review</CardTitle>
-        </CardHeader>
-        <CardContent className="semantic-review-section">
-          {migration ? (
-            <>
-              <div className="review-status-line">
-                <Badge variant="outline">{migration.readiness ?? migration.status ?? 'UNKNOWN'}</Badge>
-                <span>{migration.headline}</span>
-              </div>
-              {(migration.recommended_actions ?? []).length ? (
-                <div className="review-action-list">
-                  {migration.recommended_actions?.map((action) => (
-                    <div key={`${action.priority}-${action.title}`}>
-                      <strong>{action.title}</strong>
-                      <p>{action.description}</p>
-                      <small>{action.items?.join(', ')}</small>
-                    </div>
-                  ))}
-                </div>
-              ) : (
-                <p>No migration actions were recorded.</p>
-              )}
-            </>
-          ) : (
-            <EmptyMessage
-              title="Migration review pending"
-              description="This group has not produced a migration review yet."
+            <MetricViewName
+              fullName={migration?.candidate?.metric_view_fqn ?? review.group.candidate_metric_view_fqn}
+              exists={Boolean(migration?.candidate?.metric_view_fqn)}
             />
-          )}
-          <div className="artifact-path">
-            <span>Volume artifact</span>
-            <code>{review.artifacts.migrationReview}</code>
           </div>
         </CardContent>
       </Card>
 
-      <Card className="workspace-card">
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2">
-            <Wrench className="size-5" aria-hidden="true" />
-            Metric View repair
-          </CardTitle>
-        </CardHeader>
-        <CardContent className="semantic-review-section">
-          {repair ? (
-            <>
-              <div className="review-status-line">
-                <Badge variant="outline">{repair.status ?? 'UNKNOWN'}</Badge>
-                <span>{repair.headline}</span>
+      {showResults && migration?.gate ? <ReleaseGateCard gate={migration.gate} /> : null}
+
+      {!showResults ? null : (
+        <>
+          <Card className="workspace-card review-evidence-card">
+            <CardHeader>
+              <div className="review-card-heading">
+                <CardTitle>Semantic migration review</CardTitle>
+                <Button
+                  className="review-report-button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setOpenReport('migration')}
+                  disabled={!review.reports?.migrationReviewHtml}
+                >
+                  <FileText className="size-4" aria-hidden="true" />
+                  View full report
+                </Button>
               </div>
-              <ul className="repair-decisions">
-                {(repair.decision_reasons ?? []).map((reason) => (
-                  <li key={reason}>{reason}</li>
-                ))}
-              </ul>
-              {gates.length ? (
-                <div className="repair-gate-table">
-                  <Table>
-                    <TableHeader>
-                      <TableRow>
-                        <TableHead>Gate</TableHead>
-                        <TableHead>Before</TableHead>
-                        <TableHead>After</TableHead>
-                        <TableHead>Required</TableHead>
-                        <TableHead>Result</TableHead>
-                      </TableRow>
-                    </TableHeader>
-                    <TableBody>
-                      {gates.map((gate) => (
-                        <TableRow key={gate.key ?? gate.label}>
-                          <TableCell>
-                            <strong>{gate.label}</strong>
-                            <small>{gate.definition}</small>
-                          </TableCell>
-                          <TableCell>
-                            {gate.before !== undefined ? `${(gate.before * 100).toFixed(1)}%` : '—'}
-                          </TableCell>
-                          <TableCell>{gate.after !== undefined ? `${(gate.after * 100).toFixed(1)}%` : '—'}</TableCell>
-                          <TableCell>
-                            {gate.threshold !== undefined ? `${(gate.threshold * 100).toFixed(1)}%` : '—'}
-                          </TableCell>
-                          <TableCell>
-                            <Badge variant="outline">
-                              {gate.passed ? 'Pass' : `Fail${gate.gap_count ? ` · ${gate.gap_count} short` : ''}`}
-                            </Badge>
-                          </TableCell>
-                        </TableRow>
+            </CardHeader>
+            <CardContent className="semantic-review-section">
+              {migration ? (
+                <>
+                  <div className="review-status-line">
+                    <StatusBadge status={migration.readiness ?? migration.status} />
+                    <span>{migration.headline}</span>
+                  </div>
+                  {migration.action_groups ? (
+                    <ActionGroupsView actionGroups={migration.action_groups} />
+                  ) : (migration.recommended_actions ?? []).length ? (
+                    <div className="review-action-list">
+                      {migration.recommended_actions?.map((action) => (
+                        <div key={`${action.priority}-${action.title}`}>
+                          <strong>{action.title}</strong>
+                          <p>{action.description}</p>
+                          {action.details?.length ? (
+                            <dl className="action-detail-list">
+                              {action.details.map((detail) => (
+                                <div key={detail.name}>
+                                  <dt>{detail.name}</dt>
+                                  <dd>
+                                    <code>{detail.expression}</code>
+                                  </dd>
+                                </div>
+                              ))}
+                            </dl>
+                          ) : (
+                            <small>{action.items?.join(', ')}</small>
+                          )}
+                          {action.how_to_fix ? (
+                            <p className="action-how-to-fix">
+                              <strong>How to fix:</strong> {action.how_to_fix}
+                            </p>
+                          ) : null}
+                        </div>
                       ))}
-                    </TableBody>
-                  </Table>
-                </div>
-              ) : null}
-            </>
-          ) : (
-            <EmptyMessage
-              title="Repair report pending"
-              description="Repair has not run or the latest report is not available yet."
+                    </div>
+                  ) : (
+                    <p>No migration actions were recorded.</p>
+                  )}
+                </>
+              ) : (
+                <EmptyMessage
+                  title={inProgress ? 'Migration in progress' : 'Migration review pending'}
+                  description={
+                    inProgress
+                      ? "This group's Metric View is being built and evaluated. Results appear here when it finishes; the page refreshes every 30 seconds."
+                      : 'This group has not produced a migration review yet.'
+                  }
+                />
+              )}
+            </CardContent>
+          </Card>
+
+          <Card className="workspace-card review-evidence-card">
+            <CardHeader>
+              <div className="review-card-heading">
+                <CardTitle className="flex items-center gap-2">
+                  <Wrench className="size-5" aria-hidden="true" />
+                  Metric View repair
+                </CardTitle>
+                <Button
+                  className="review-report-button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setOpenReport('repair')}
+                  disabled={!review.reports?.repairReviewHtml}
+                >
+                  <FileText className="size-4" aria-hidden="true" />
+                  View full report
+                </Button>
+              </div>
+            </CardHeader>
+            <CardContent className="semantic-review-section">
+              {repair ? (
+                <>
+                  <div className="review-status-line">
+                    <StatusBadge status={repair.status} />
+                    <span>{repair.headline}</span>
+                  </div>
+                  <ul className="repair-decisions">
+                    {(repair.decision_reasons ?? []).map((reason) => (
+                      <li key={reason}>{reason}</li>
+                    ))}
+                  </ul>
+                  {gates.length ? (
+                    <div className="repair-gate-table">
+                      <Table>
+                        <TableHeader>
+                          <TableRow>
+                            <TableHead>Gate</TableHead>
+                            <TableHead>Before</TableHead>
+                            <TableHead>After</TableHead>
+                            <TableHead>Required</TableHead>
+                            <TableHead>Result</TableHead>
+                          </TableRow>
+                        </TableHeader>
+                        <TableBody>
+                          {gates.map((gate) => (
+                            <TableRow key={gate.key ?? gate.label}>
+                              <TableCell>
+                                <strong>{gate.label}</strong>
+                                <small>{gate.definition}</small>
+                              </TableCell>
+                              <TableCell>
+                                {gate.before !== undefined ? `${(gate.before * 100).toFixed(1)}%` : '—'}
+                              </TableCell>
+                              <TableCell>
+                                {gate.after !== undefined ? `${(gate.after * 100).toFixed(1)}%` : '—'}
+                              </TableCell>
+                              <TableCell>
+                                {gate.threshold !== undefined ? `${(gate.threshold * 100).toFixed(1)}%` : '—'}
+                              </TableCell>
+                              <TableCell>
+                                <Badge variant="outline">
+                                  {gate.passed ? 'Pass' : `Fail${gate.gap_count ? ` · ${gate.gap_count} short` : ''}`}
+                                </Badge>
+                              </TableCell>
+                            </TableRow>
+                          ))}
+                        </TableBody>
+                      </Table>
+                    </div>
+                  ) : null}
+                  {migration?.action_groups && (repair.blocking_findings ?? []).length ? (
+                    <p className="approval-hint">
+                      Measures that need a person are listed once, with the reason, under Action items in the semantic
+                      migration review above. The full repair report keeps every per-measure detail.
+                    </p>
+                  ) : (repair.blocking_findings ?? []).length ? (
+                    <div className="review-action-list" aria-label="Repair action items">
+                      {repair.blocking_findings?.map((finding, index) => (
+                        <div key={`${finding.source_name ?? 'finding'}-${finding.status ?? index}`}>
+                          <strong>{finding.source_name ?? `Finding ${index + 1}`}</strong>
+                          <p>{finding.status ? statusLabel(finding.status) : 'Needs review'}</p>
+                          {finding.failure_details?.[0]?.meaning ? <p>{finding.failure_details[0].meaning}</p> : null}
+                          {finding.target?.expr ? (
+                            <code className="action-expression">{finding.target.expr}</code>
+                          ) : null}
+                          {finding.query_detail?.status === 'FAIL' && finding.query_detail.reason ? (
+                            <small className="action-query-error">Query error: {finding.query_detail.reason}</small>
+                          ) : null}
+                          <small>
+                            {finding.recommended_action
+                              ? `How to fix: ${finding.recommended_action}`
+                              : 'This run was produced by an older workflow version without fix guidance. Open the full report for details.'}
+                          </small>
+                        </div>
+                      ))}
+                    </div>
+                  ) : null}
+                </>
+              ) : (
+                <EmptyMessage
+                  title={inProgress ? 'Evaluation and repair in progress' : 'Repair report pending'}
+                  description={
+                    inProgress
+                      ? 'Automatic evaluation and repair run after the Metric View is built.'
+                      : 'Repair has not run or the latest report is not available yet.'
+                  }
+                />
+              )}
+            </CardContent>
+          </Card>
+        </>
+      )}
+
+      <Dialog open={openReport !== null} onOpenChange={(open) => !open && setOpenReport(null)}>
+        <DialogContent className="semantic-report-dialog">
+          <DialogHeader>
+            <DialogTitle>{reportTitle}</DialogTitle>
+            <DialogDescription>
+              {review.group.display_name} · generated workflow evidence and recommended actions
+            </DialogDescription>
+          </DialogHeader>
+          {reportHtml ? (
+            <iframe
+              className="semantic-report-frame"
+              title={`${reportTitle} for ${review.group.display_name}`}
+              srcDoc={reportHtml}
+              sandbox=""
             />
+          ) : (
+            <EmptyMessage title="Report unavailable" description="This workflow run did not produce the HTML report." />
           )}
-          <div className="artifact-path">
-            <span>Volume artifact</span>
-            <code>{review.artifacts.repairReview}</code>
-          </div>
-        </CardContent>
-      </Card>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setOpenReport(null)}>
+              Close
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
@@ -2581,9 +3451,12 @@ function MappingWorkspace({ group, detail, onBack }: { group: GroupSummary; deta
                 <section className="workflow-job">
                   <Badge variant="outline">{semanticResults.metricView.status ?? 'UNKNOWN'}</Badge>
                   <h4>Metric View</h4>
-                  <code>
-                    {semanticResults.metricView.metric_view_fqn ?? semanticResults.manifest.candidate_metric_view_fqn}
-                  </code>
+                  <MetricViewName
+                    fullName={
+                      semanticResults.metricView.metric_view_fqn ?? semanticResults.manifest.candidate_metric_view_fqn
+                    }
+                    exists={Boolean(semanticResults.metricView.metric_view_fqn)}
+                  />
                   <p>
                     {semanticResults.metricView.measure_count ?? '—'} measures ·{' '}
                     {semanticResults.metricView.dimension_count ?? '—'} dimensions

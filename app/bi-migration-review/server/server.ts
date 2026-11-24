@@ -5,7 +5,8 @@ import path from 'node:path';
 import { parse as parseYaml } from 'yaml';
 import { stringify as stringifyYaml } from 'yaml';
 import { z } from 'zod';
-import type { Request } from 'express';
+import type { Request, Response } from 'express';
+import { semanticInputRoot } from './semantic-input';
 
 type GroupSummary = {
   group_id: string;
@@ -54,9 +55,9 @@ type SemanticRunGroup = {
   status: string;
 };
 
-const projectRoot = path.resolve(process.cwd(), '../..');
+const appRoot = process.cwd();
 let activeMigrationName = process.env.BI_MIGRATION_NAME ?? 'superstore-migration';
-let activeMigrationMode: MigrationMode = 'dashboard';
+let activeMigrationMode: MigrationMode = 'semantic_model';
 const defaultTargetCatalog = process.env.BI_MIGRATION_TARGET_CATALOG ?? 'main';
 const defaultTargetSchema = process.env.BI_MIGRATION_TARGET_SCHEMA ?? 'superstore';
 const volumeRoot = process.env.DATABRICKS_VOLUME_FILES?.replace(/\/$/, '') ?? '';
@@ -251,26 +252,6 @@ function normalizeVolumePath(value: string) {
 function volumeRootFromPath(value: string) {
   const match = normalizeVolumePath(value).match(/^\/Volumes\/([^/]+)\/([^/]+)\/([^/]+)/);
   return match ? `/Volumes/${match[1]}/${match[2]}/${match[3]}` : '';
-}
-
-function semanticInputRoot(datasourcePath: string, mappingPath: string) {
-  const normalizedDatasource = normalizeVolumePath(datasourcePath);
-  const normalizedMapping = normalizeVolumePath(mappingPath);
-  const mappingDirectory = /\/table-mapping\.(csv|ya?ml)$/i.test(normalizedMapping)
-    ? normalizedMapping.slice(0, normalizedMapping.lastIndexOf('/'))
-    : normalizedMapping;
-  if (!normalizedDatasource.endsWith('/datasources')) {
-    throw new Error('Datasource path must point to a datasources folder.');
-  }
-  if (!mappingDirectory.endsWith('/mappings')) {
-    throw new Error('Mapping path must point to a mappings folder or table-mapping.csv/yaml within it.');
-  }
-  const datasourceRoot = normalizedDatasource.slice(0, -'/datasources'.length);
-  const mappingRoot = mappingDirectory.slice(0, -'/mappings'.length);
-  if (datasourceRoot !== mappingRoot) {
-    throw new Error('Datasource and mapping paths must share the same parent input folder.');
-  }
-  return datasourceRoot;
 }
 
 function workspaceRunUrl(jobId: string | undefined, runId: number | null) {
@@ -492,6 +473,18 @@ await createApp({
     appkit.server.extend((app) => {
       const volumeHandle = (request: Request) =>
         process.env.NODE_ENV === 'development' ? appkit.files('files') : appkit.files('files').asUser(request);
+      const resolveSemanticRunPath = async (request: Request, root: string, runId: string) => {
+        const entries = await volumeHandle(request).list(`${root}/runs`);
+        const matches = entries
+          .map((entry) => normalizeVolumePath(entry.path ?? ''))
+          .filter((entryPath) => {
+            const folderName = entryPath.split('/').pop() ?? '';
+            return folderName === runId || folderName.startsWith(`${runId}--`);
+          });
+        if (matches.length === 1) return matches[0];
+        if (matches.length === 0) throw new Error(`Semantic workflow run ${runId} was not found.`);
+        throw new Error(`Semantic workflow run ${runId} matches multiple retained folders.`);
+      };
       const volumePathFromName = (name: string) =>
         /^([A-Za-z_][\w-]*)\.([A-Za-z_][\w-]*)\.([A-Za-z_][\w-]*)$/.test(name)
           ? `/Volumes/${name.split('.').join('/')}`
@@ -681,14 +674,25 @@ await createApp({
         });
       });
 
+      const sendAppDocument = async (response: Response, fileName: string) => {
+        try {
+          response.type('text/markdown').send(await readFile(path.join(appRoot, 'docs', fileName), 'utf8'));
+        } catch (error) {
+          response.status(404).type('text/plain').send('Documentation is unavailable in this deployment.');
+          console.error(`Could not load App document ${fileName}`, error);
+        }
+      };
+
+      app.get('/api/docs/installation', async (_request, response) => {
+        await sendAppDocument(response, 'INSTALLATION_GUIDE.md');
+      });
+      // Older links to the user guide now open the installation guide; usage lives on the Home page.
       app.get('/api/docs/project-plan', async (_request, response) => {
-        response.type('text/markdown').send(await readFile(path.join(projectRoot, 'PROJECT_PLAN.md'), 'utf8'));
+        await sendAppDocument(response, 'INSTALLATION_GUIDE.md');
       });
 
       app.get('/api/docs/mapping-guide', async (_request, response) => {
-        response
-          .type('text/markdown')
-          .send(await readFile(path.join(projectRoot, 'skills/extract-bi-mappings/SKILL.md'), 'utf8'));
+        await sendAppDocument(response, 'MAPPING_GUIDE.md');
       });
 
       app.get('/api/session', async (request, response) => {
@@ -697,9 +701,14 @@ await createApp({
           response.json({
             displayName: user.displayName || user.userName || 'Databricks user',
             userName: user.userName || '',
+            workspaceUrl: process.env.DATABRICKS_WORKSPACE_URL ?? null,
           });
         } catch {
-          response.json({ displayName: 'Signed-in Databricks user', userName: '' });
+          response.json({
+            displayName: 'Signed-in Databricks user',
+            userName: '',
+            workspaceUrl: process.env.DATABRICKS_WORKSPACE_URL ?? null,
+          });
         }
       });
 
@@ -723,30 +732,43 @@ await createApp({
           const mappingDirectory = /\/table-mapping\.(csv|ya?ml)$/i.test(normalizedMappingPath)
             ? normalizedMappingPath.slice(0, normalizedMappingPath.lastIndexOf('/'))
             : normalizedMappingPath;
-          const [datasourceExists, mappingExists, mappingEntries] = await Promise.all([
-            volume.exists(normalizeVolumePath(parsed.data.datasourcePath)),
-            volume.exists(normalizedMappingPath),
-            volume.list(mappingDirectory).catch(() => []),
+          // List folders instead of exists(): exists() does not report directories.
+          const [datasourceEntries, mappingEntries] = await Promise.all([
+            volume.list(`${inputRoot}/datasources`).catch(() => null),
+            volume.list(mappingDirectory).catch(() => null),
           ]);
-          if (!datasourceExists || !mappingExists) {
+          const entryName = (entry: { path?: string; name?: string }) =>
+            entry.name ?? (entry.path ?? '').split('/').pop() ?? '';
+          const datasourceCount = (datasourceEntries ?? []).filter((entry) =>
+            /\.tdsx?$/i.test(entryName(entry))
+          ).length;
+          if (!datasourceEntries || datasourceCount === 0) {
             response.status(404).json({
-              error: `${!datasourceExists ? 'Datasource' : 'Mapping'} path was not found or is not accessible.`,
+              error: datasourceEntries
+                ? `${inputRoot}/datasources contains no .tds or .tdsx files.`
+                : `No datasources folder found at ${inputRoot}/datasources, or the App cannot read it.`,
             });
             return;
           }
-          const hasSupportedMapping =
-            /\/table-mapping\.(csv|ya?ml)$/i.test(normalizedMappingPath) ||
-            mappingEntries.some((entry) => /(^|\/)table-mapping\.(csv|ya?ml)$/i.test(entry.path ?? ''));
-          if (!hasSupportedMapping) {
-            response.status(400).json({
-              error: 'The mappings folder must contain table-mapping.csv, table-mapping.yaml, or table-mapping.yml.',
+          const mappingNames = (mappingEntries ?? []).map(entryName);
+          const requestedMappingFile = /\/table-mapping\.(csv|ya?ml)$/i.test(normalizedMappingPath)
+            ? normalizedMappingPath.split('/').pop()
+            : null;
+          const hasSupportedMapping = requestedMappingFile
+            ? mappingNames.includes(requestedMappingFile)
+            : mappingNames.some((name) => /^table-mapping\.(csv|ya?ml)$/i.test(name));
+          if (!mappingEntries || !hasSupportedMapping) {
+            response.status(404).json({
+              error: requestedMappingFile
+                ? `${normalizedMappingPath} was not found, or the App cannot read it.`
+                : `${mappingDirectory} must contain table-mapping.yaml, table-mapping.yml, or table-mapping.csv.`,
             });
             return;
           }
           response.json({
             status: 'ready',
             inputRoot,
-            datasourcePath: normalizeVolumePath(parsed.data.datasourcePath),
+            datasourcePath: `${inputRoot}/datasources`,
             mappingPath: normalizeVolumePath(parsed.data.mappingPath),
           });
         } catch (error) {
@@ -771,57 +793,94 @@ await createApp({
           const runs = await Promise.all(
             entries.map(async (entry) => {
               const entryPath = normalizeVolumePath(entry.path ?? '');
-              const runId = entryPath.split('/').pop() ?? '';
-              if (!runId) return null;
+              const runFolder = entryPath.split('/').pop() ?? '';
+              if (!runFolder) return null;
               const readJson = async <T>(artifactPath: string): Promise<T | null> =>
                 volume
                   .read(artifactPath)
                   .then((content) => JSON.parse(content) as T)
                   .catch(() => null);
-              const [manifest, groupsIndex, review] = await Promise.all([
-                readJson<{ status?: string; created_at?: string; input?: { input_volume_path?: string } }>(
-                  `${entryPath}/manifest.json`
-                ),
+              const [manifest, groupsIndex, review, approval] = await Promise.all([
+                readJson<{
+                  workflow_run_id?: string;
+                  status?: string;
+                  created_at?: string;
+                  input?: { input_volume_path?: string };
+                }>(`${entryPath}/manifest.json`),
                 readJson<{ groups?: SemanticRunGroup[]; summary?: Record<string, number> }>(
                   `${entryPath}/_internal/semantic-groups-index.json`
                 ),
                 readJson<{ status?: string; headline?: string; totals?: Record<string, number> }>(
                   `${entryPath}/reports/index.json`
                 ),
+                readJson<{ approved_by?: string; approved_at?: string; migration_run_id?: string }>(
+                  `${entryPath}/reports/grouping-approval.json`
+                ),
               ]);
               if (!manifest && !groupsIndex && !review) return null;
               const groups = await Promise.all(
                 (groupsIndex?.groups ?? []).map(async (group) => {
-                  const migrationReview = await readJson<{ readiness?: string; status?: string }>(
-                    `${entryPath}/reports/groups/${group.group_id}/migration-review.json`
-                  );
+                  const migrationReview = await readJson<{
+                    readiness?: string;
+                    status?: string;
+                    gate?: { status?: string };
+                  }>(`${entryPath}/reports/groups/${group.group_id}/migration-review.json`);
                   return {
                     ...group,
                     readiness: migrationReview?.readiness ?? null,
+                    gateStatus: migrationReview?.gate?.status ?? null,
                     migrationStatus: migrationReview?.status ?? null,
                   };
                 })
               );
+              const runId = manifest?.workflow_run_id ?? runFolder.split('--')[0];
               return {
                 runId,
+                runFolder,
                 runPath: entryPath,
                 createdAt: manifest?.created_at ?? null,
                 inputVolumePath: manifest?.input?.input_volume_path ?? null,
-                status: review?.status ?? manifest?.status ?? 'IN_PROGRESS',
+                // Each finished group rewrites reports/index.json, so trust the manifest while migration is running.
+                status:
+                  manifest?.status === 'MIGRATION_RUNNING'
+                    ? 'MIGRATION_RUNNING'
+                    : (review?.status ?? manifest?.status ?? 'IN_PROGRESS'),
+                manifestStatus: manifest?.status ?? null,
+                supersededBy: null as string | null,
                 headline:
                   review?.headline ?? `${groups.length} proposed semantic group${groups.length === 1 ? '' : 's'}.`,
                 totals: review?.totals ?? groupsIndex?.summary ?? {},
                 groups,
                 reportPath: `${entryPath}/reports/index.json`,
+                approval: approval
+                  ? {
+                      approvedBy: approval.approved_by ?? null,
+                      approvedAt: approval.approved_at ?? null,
+                      migrationRunId: approval.migration_run_id ?? null,
+                      migrationRunUrl: approval.migration_run_id
+                        ? workspaceRunUrl(
+                            process.env.DATABRICKS_JOB_SEMANTIC_MIGRATION,
+                            Number(approval.migration_run_id)
+                          )
+                        : null,
+                    }
+                  : null,
               };
             })
           );
-          response.json({
-            root,
-            runs: runs
-              .filter((run): run is NonNullable<typeof run> => run !== null)
-              .sort((left, right) => right.runId.localeCompare(left.runId, undefined, { numeric: true })),
-          });
+          const sortedRuns = runs
+            .filter((run): run is NonNullable<typeof run> => run !== null)
+            .sort((left, right) => (right.createdAt ?? '').localeCompare(left.createdAt ?? ''));
+          // Mirror the migration Job's resolver: the newest proposal for an input folder supersedes older ones.
+          const newestPendingByInput = new Map<string, string>();
+          for (const run of sortedRuns) {
+            if (run.manifestStatus !== 'GROUPING_REVIEW_REQUIRED') continue;
+            const inputKey = run.inputVolumePath ?? '';
+            const newest = newestPendingByInput.get(inputKey);
+            if (newest) run.supersededBy = newest;
+            else newestPendingByInput.set(inputKey, run.runFolder);
+          }
+          response.json({ root, runs: sortedRuns });
         } catch (error) {
           response.status(404).json({
             error: 'Semantic workflow runs could not be loaded from this Volume folder.',
@@ -842,21 +901,32 @@ await createApp({
           response.status(400).json({ error: 'A valid run folder and semantic group are required.' });
           return;
         }
-        const runPath = `${normalizeVolumePath(parsed.data.root)}/runs/${parsed.data.runId}`;
-        const groupReportPath = `${runPath}/reports/groups/${parsed.data.groupId}`;
         try {
           const volume = volumeHandle(request);
+          const runPath = await resolveSemanticRunPath(
+            request,
+            normalizeVolumePath(parsed.data.root),
+            parsed.data.runId
+          );
+          const groupReportPath = `${runPath}/reports/groups/${parsed.data.groupId}`;
           const readJson = async <T>(artifactPath: string): Promise<T | null> =>
             volume
               .read(artifactPath)
               .then((content) => JSON.parse(content) as T)
               .catch(() => null);
-          const [groupsIndex, migrationReview, repairReview, sourceSummary] = await Promise.all([
-            readJson<{ groups?: SemanticRunGroup[] }>(`${runPath}/_internal/semantic-groups-index.json`),
-            readJson<Record<string, unknown>>(`${groupReportPath}/migration-review.json`),
-            readJson<Record<string, unknown>>(`${groupReportPath}/repair-review.json`),
-            readJson<Record<string, unknown>>(`${runPath}/groups/${parsed.data.groupId}/_internal/source-summary.json`),
-          ]);
+          const readText = async (artifactPath: string): Promise<string | null> =>
+            volume.read(artifactPath).catch(() => null);
+          const [groupsIndex, migrationReview, repairReview, sourceSummary, migrationReviewHtml, repairReviewHtml] =
+            await Promise.all([
+              readJson<{ groups?: SemanticRunGroup[] }>(`${runPath}/_internal/semantic-groups-index.json`),
+              readJson<Record<string, unknown>>(`${groupReportPath}/migration-review.json`),
+              readJson<Record<string, unknown>>(`${groupReportPath}/repair-review.json`),
+              readJson<Record<string, unknown>>(
+                `${runPath}/groups/${parsed.data.groupId}/_internal/source-summary.json`
+              ),
+              readText(`${groupReportPath}/migration-review.html`),
+              readText(`${groupReportPath}/repair-review.html`),
+            ]);
           const group = groupsIndex?.groups?.find((item) => item.group_id === parsed.data.groupId);
           if (!group) {
             response.status(404).json({ error: 'Semantic group was not found in this run.' });
@@ -867,6 +937,10 @@ await createApp({
             sourceSummary,
             migrationReview,
             repairReview,
+            reports: {
+              migrationReviewHtml,
+              repairReviewHtml,
+            },
             artifacts: {
               migrationReview: `${groupReportPath}/migration-review.json`,
               migrationReviewHtml: `${groupReportPath}/migration-review.html`,
@@ -883,15 +957,57 @@ await createApp({
       });
 
       app.post('/api/semantic-runs/:runId/migrate', async (request, response) => {
-        const parsed = z.object({ runId: z.string().regex(/^\d+$/) }).safeParse(request.params);
+        const parsed = z
+          .object({ runId: z.string().regex(/^\d+$/), root: absoluteVolumePathSchema.optional() })
+          .safeParse({ ...request.params, root: (request.body as { root?: string } | undefined)?.root });
         if (!parsed.success) {
           response.status(400).json({ error: 'A valid proposal run is required.' });
           return;
         }
-        const approvedBy =
-          request.header('x-forwarded-email') || request.header('x-forwarded-user') || 'Databricks user';
+        const root = normalizeVolumePath(parsed.data.root ?? process.env.DATASOURCE_SEMANTIC_OUTPUT_PATH ?? '');
+        type RunManifest = { status?: string; created_at?: string; input?: { input_volume_path?: string } };
+        const volume = volumeHandle(request);
+        const readManifest = (runPath: string) =>
+          volume
+            .read(`${runPath}/manifest.json`)
+            .then((content) => JSON.parse(content) as RunManifest)
+            .catch(() => null);
+        let runPath: string;
+        try {
+          runPath = await resolveSemanticRunPath(request, root, parsed.data.runId);
+        } catch (error) {
+          response.status(404).json({ error: error instanceof Error ? error.message : 'Proposal run not found.' });
+          return;
+        }
+        // Same rules as the migration Job's resolver, checked up front so the user gets an immediate answer.
+        const manifest = await readManifest(runPath);
+        if (manifest?.status !== 'GROUPING_REVIEW_REQUIRED') {
+          response.status(409).json({
+            error: `This proposal is not awaiting approval (status ${manifest?.status ?? 'unknown'}). It has already been sent to migration or has not finished proposing.`,
+          });
+          return;
+        }
+        const otherRuns = (await volume.list(`${root}/runs`))
+          .map((entry) => normalizeVolumePath(entry.path ?? ''))
+          .filter((entryPath) => entryPath && entryPath !== runPath);
+        for (const otherPath of otherRuns) {
+          const other = await readManifest(otherPath);
+          if (
+            other?.status === 'GROUPING_REVIEW_REQUIRED' &&
+            other.input?.input_volume_path === manifest.input?.input_volume_path &&
+            (other.created_at ?? '') > (manifest.created_at ?? '')
+          ) {
+            response.status(409).json({
+              error: `A newer proposal for the same input exists (${otherPath.split('/').pop()}). Approve that run instead.`,
+            });
+            return;
+          }
+        }
+        const runFolder = runPath.split('/').pop() ?? parsed.data.runId;
+        // Leave approved_by empty when no signed-in user is forwarded; the Job then records who started the run.
+        const approvedBy = request.header('x-forwarded-email') || request.header('x-forwarded-user') || '';
         const jobResult = await appkit.jobs('semantic_migration').runNow({
-          job_parameters: { proposal_run_id: parsed.data.runId, approved_by: approvedBy },
+          job_parameters: { proposal_run_id: runFolder, approved_by: approvedBy },
         });
         if (!jobResult.ok || !jobResult.data.run_id) {
           response.status(502).json({ error: 'Semantic migration Job submission failed.' });
@@ -899,7 +1015,43 @@ await createApp({
         }
         response.status(202).json({
           runId: jobResult.data.run_id,
+          proposalRunFolder: runFolder,
           runUrl: workspaceRunUrl(process.env.DATABRICKS_JOB_SEMANTIC_MIGRATION, jobResult.data.run_id),
+        });
+      });
+
+      app.get('/api/semantic-migrations/:migrationRunId', async (request, response) => {
+        const parsed = z.object({ migrationRunId: z.coerce.number().int().positive() }).safeParse(request.params);
+        if (!parsed.success) {
+          response.status(400).json({ error: 'A valid migration run ID is required.' });
+          return;
+        }
+        const run = await appkit.jobs('semantic_migration').getRun(parsed.data.migrationRunId);
+        if (!run.ok) {
+          response.status(502).json({ error: 'Could not read the migration run.' });
+          return;
+        }
+        const approveTask = run.data.tasks?.find((task) => task.task_key === 'approve_semantic_groups');
+        const approveLifeCycle = String(approveTask?.state?.life_cycle_state ?? 'PENDING');
+        const approveResult = String(approveTask?.state?.result_state ?? '');
+        let approval: 'pending' | 'approved' | 'rejected' = 'pending';
+        let approvalError: string | null = null;
+        if (approveResult === 'SUCCESS') approval = 'approved';
+        else if (approveResult && approveLifeCycle === 'TERMINATED') approval = 'rejected';
+        else if (['INTERNAL_ERROR', 'SKIPPED'].includes(approveLifeCycle)) approval = 'rejected';
+        if (approval === 'rejected' && approveTask?.run_id) {
+          const output = await appkit.jobs('semantic_migration').getRunOutput(approveTask.run_id);
+          approvalError = output.ok
+            ? (output.data.error ?? approveTask.state?.state_message ?? null)
+            : (approveTask.state?.state_message ?? null);
+        }
+        response.json({
+          runId: parsed.data.migrationRunId,
+          lifeCycleState: String(run.data.state?.life_cycle_state ?? ''),
+          resultState: String(run.data.state?.result_state ?? ''),
+          approval,
+          approvalError,
+          runUrl: workspaceRunUrl(process.env.DATABRICKS_JOB_SEMANTIC_MIGRATION, parsed.data.migrationRunId),
         });
       });
 
