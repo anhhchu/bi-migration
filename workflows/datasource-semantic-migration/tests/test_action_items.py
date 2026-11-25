@@ -122,3 +122,18 @@ def test_unmapped_datasource_is_reported_once():
 
     assert by_category(result)["data_mapping"] == ["Sales above Target?"]
     assert "business_definition" not in by_category(result)
+
+
+def test_lineage_error_stays_blocking_after_per_measure_checks():
+    result = actions(
+        scorecard_evaluation={"blocking_findings": [], "relationship_blockers": []},
+        evaluation_findings=[
+            {"code": "DISALLOWED_LINEAGE", "severity": "ERROR", "tables": ["main.gold.customers_pii"]},
+            {"code": "CANDIDATE_NOT_QUERYABLE", "severity": "ERROR", "message": "fixed by repair since"},
+        ],
+    )
+
+    data_mapping = next(group for group in result["groups"] if group["category"] == "data_mapping")
+    assert data_mapping["blocking"] is True
+    assert any("main.gold.customers_pii" in item["detail"] for item in data_mapping["items"])
+    assert not any("fixed by repair" in item["detail"] for group in result["groups"] for item in group["items"])

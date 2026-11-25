@@ -51,6 +51,7 @@ evaluation = evaluate_candidate(
     target_profile=target_profile,
     query_results=query_results,
     excluded_measures=import_exclusions(group_internal_path / "importbi-result.json"),
+    allowed_tables=manifest["target_tables"],
 )
 evaluation.update(
     {

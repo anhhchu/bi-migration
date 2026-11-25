@@ -147,6 +147,14 @@ def _design_stage(*, scorecard_evaluation: dict[str, Any] | None, repair: dict[s
             f"Fix {names or 'the unsafe joins'} as shown in the repair report, then run the Datasource semantic repair Job.",
             query_failures=len(query_failed),
         )
+    unmet = [name.replace("_", " ") for name, met in (scorecard_evaluation.get("gates") or {}).items() if not met]
+    if unmet:
+        # Repair's own acceptance gates decide readiness; the gate must not report a pass they do not.
+        return _stage(
+            "design", "Design", WARN, summary + f" Acceptance checks not met: {', '.join(unmet)}.",
+            "Review the repair report's coverage gates; translate or explicitly exclude the remaining measures.",
+            query_failures=0,
+        )
     if review_actions:
         titles = "; ".join(str(action.get("title")) for action in review_actions)
         return _stage("design", "Design", WARN, summary, f"Review: {titles}.", query_failures=0)

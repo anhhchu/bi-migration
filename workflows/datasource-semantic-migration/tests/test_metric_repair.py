@@ -1,3 +1,5 @@
+import pytest
+
 from datasource_semantic_migration.metric_repair import (
     apply_metric_patch,
     build_deterministic_patch,
@@ -160,6 +162,7 @@ def test_measures_composed_from_other_measures_count_as_aggregated():
         ],
         metric_view=target,
         target_profile={"relationships": []},
+        query_results={name.casefold(): {"status": "PASS"} for name in names},
     )
 
     statuses = {item["source_name"]: item["status"] for item in evaluation["scorecards"]}
@@ -268,3 +271,158 @@ def test_import_exclusions_reads_every_field_name(tmp_path):
 
     assert import_exclusions(path) == ["Rank", "Index", "Flag"]
     assert import_exclusions(tmp_path / "missing.json") == []
+
+
+def field_measure(name, aggregation):
+    return {
+        "measure_id": f"measure-{name}",
+        "display_name": name,
+        "status": "READY",
+        "aggregation": aggregation,
+        "expression": {"kind": "field_aggregate", "field_id": name},
+        "dependencies": [],
+    }
+
+
+def formula_measure(name, formula, functions):
+    return {
+        "measure_id": f"measure-{name}",
+        "display_name": name,
+        "status": "READY",
+        "aggregation": "FORMULA",
+        "expression": {"kind": "source_calculation", "formula": formula, "classification": {"aggregate_functions": functions}},
+        "dependencies": [],
+    }
+
+
+def _evaluate(source_measures, target_measures, **extra):
+    return evaluate_candidate(
+        source_metric_irs=[{"measures": source_measures}],
+        metric_view={"source": ORDERS, "measures": target_measures},
+        target_profile=PROFILE,
+        query_results={item["name"].casefold(): {"status": "PASS"} for item in target_measures},
+        **extra,
+    )
+
+
+@pytest.mark.parametrize(
+    ("aggregation", "target_expression", "suggested"),
+    [
+        ("AVG", "SUM(price)", "AVG(price)"),
+        ("COUNT_DISTINCT", "COUNT(customer_id)", "COUNT(DISTINCT customer_id)"),
+        ("MAX", "SUM(order_date)", "MAX(order_date)"),
+    ],
+)
+def test_base_field_with_a_different_aggregate_is_rewritten_deterministically(aggregation, target_expression, suggested):
+    evaluation = _evaluate([field_measure("Metric", aggregation)], [{"name": "Metric", "expr": target_expression}])
+
+    scorecard = evaluation["scorecards"][0]
+    assert scorecard["failure_codes"] == ["AGGREGATION_MISMATCH"]
+    assert scorecard["repair_route"] == "DETERMINISTIC_METRIC_PATCH"
+    patch = build_deterministic_patch(evaluation, {"measures": []})
+    assert [item["after"] for item in patch["operations"]] == [suggested]
+
+
+@pytest.mark.parametrize(
+    ("aggregation", "target_expression"),
+    [
+        ("SUM", "SUM(sales)"),
+        ("SUM", "COUNT_IF(returned)"),
+        ("COUNT", "SUM(CASE WHEN id IS NOT NULL THEN 1 END)"),
+        ("COUNT_DISTINCT", "COUNT(DISTINCT customer_id)"),
+        ("AVG", "MEASURE(`Total`) / MEASURE(`Orders`)"),
+    ],
+)
+def test_matching_or_composed_aggregates_pass(aggregation, target_expression):
+    evaluation = _evaluate([field_measure("Metric", aggregation)], [{"name": "Metric", "expr": target_expression}])
+
+    assert evaluation["scorecards"][0]["status"] == "PASS_SEMANTIC_ONLY"
+
+
+def test_calculations_and_unreadable_totals_are_not_aggregation_checked():
+    # Real translations from earlier runs: LOD values taken with MAX, and join-safe totals via AGGREGATE().
+    evaluation = _evaluate(
+        [
+            formula_measure("Fixed Profit", "SUM([Profit Year Total])", ["SUM"]),
+            field_measure("Doctors", "SUM"),
+        ],
+        [
+            {"name": "Fixed Profit", "expr": "MAX(profit_year_total) FILTER (WHERE YEAR(order_date) = year_parameter)"},
+            {"name": "Doctors", "expr": "AGGREGATE(TRANSFORM(COLLECT_SET(v), x -> x), 0, (acc, x) -> acc + x)"},
+        ],
+    )
+
+    assert {item["status"] for item in evaluation["scorecards"]} == {"PASS_SEMANTIC_ONLY"}
+
+
+@pytest.mark.parametrize("target_expression", ["COUNT(1)", "COUNT(*)", "COUNT(DISTINCT asset.asset_id)", "COUNT_IF(channel = 'POS')"])
+def test_row_count_fields_accept_any_row_count(target_expression):
+    evaluation = _evaluate([field_measure("Orders", "ROW_COUNT")], [{"name": "Orders", "expr": target_expression}])
+
+    assert evaluation["scorecards"][0]["status"] == "PASS_SEMANTIC_ONLY"
+
+
+def test_translated_measure_without_query_evidence_is_not_a_pass():
+    evaluation = evaluate_candidate(
+        source_metric_irs=[{"measures": [measure("Sales")]}],
+        metric_view={"source": ORDERS, "measures": [{"name": "Sales", "expr": "SUM(sales)"}]},
+        target_profile=PROFILE,
+    )
+
+    scorecard = evaluation["scorecards"][0]
+    assert scorecard["status"] == "FAILED_VALUE"
+    assert scorecard["failure_codes"] == ["QUERY_NOT_RUN"]
+    assert evaluation["needs_genie"] is False
+    assert next_attempt_decision(evaluation, {**evaluation, "failure_signature": "x"}, genie_ran=False)["retry"] is False
+
+
+def test_join_to_an_unapproved_table_blocks_the_candidate():
+    metric_view = {
+        "source": ORDERS,
+        "joins": [
+            {"name": "customer", "source": "main.gold.customers", "on": "source.customer_id = customer.id",
+             "joins": [{"name": "pii", "source": "main.gold.customers_pii", "on": "customer.id = pii.id"}]},
+        ],
+        "measures": [{"name": "Sales", "expr": "SUM(sales)"}],
+    }
+
+    assert target_lineage(metric_view) == ["main.gold.customers", "main.gold.customers_pii", "main.gold.orders"]
+    evaluation = evaluate_candidate(
+        source_metric_irs=[{"measures": [measure("Sales")]}],
+        metric_view=metric_view,
+        target_profile=PROFILE,
+        query_results={"sales": {"status": "PASS"}},
+        allowed_tables=["main.gold.orders", "MAIN.gold.customers"],
+    )
+
+    assert evaluation["readiness"] == "BLOCKED_EVIDENCE"
+    assert [item["name"] for item in evaluation["relationship_blockers"]] == ["Reads main.gold.customers_pii"]
+
+
+def test_same_named_measures_with_different_definitions_need_a_person():
+    sales_sum = field_measure("Sales", "SUM")
+    sales_avg = {**field_measure("Sales", "AVG"), "measure_id": "measure-Sales-2"}
+    evaluation = evaluate_candidate(
+        source_metric_irs=[{"measures": [sales_sum]}, {"measures": [sales_avg]}, {"measures": [dict(sales_sum)]}],
+        metric_view={"source": ORDERS, "measures": [{"name": "Sales", "expr": "SUM(sales)"}]},
+        target_profile=PROFILE,
+        query_results={"sales": {"status": "PASS"}},
+    )
+
+    statuses = sorted((item["metric_id"], item["status"]) for item in evaluation["scorecards"])
+    assert statuses == [("measure-Sales", "PASS_SEMANTIC_ONLY"), ("measure-Sales-2", "FAILED_SEMANTICS")]
+    conflict = next(item for item in evaluation["scorecards"] if item["metric_id"] == "measure-Sales-2")
+    assert conflict["failure_codes"] == ["DUPLICATE_MEASURE_NAME"]
+    assert conflict["repair_route"] == "HUMAN_DECISION"
+    assert evaluation["needs_genie"] is False
+
+
+def test_query_results_match_names_with_repeated_spaces():
+    evaluation = evaluate_candidate(
+        source_metric_irs=[{"measures": [measure("%  MOM Value Color")]}],
+        metric_view={"source": ORDERS, "measures": [{"name": "%  MOM Value Color", "expr": "MEASURE(`% MOM Value`)"}]},
+        target_profile=PROFILE,
+        query_results={"%  mom value color": {"status": "PASS"}},
+    )
+
+    assert evaluation["scorecards"][0]["status"] == "PASS_SEMANTIC_ONLY"

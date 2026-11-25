@@ -157,3 +157,19 @@ def test_metric_ir_artifacts_and_index_are_deterministic(tmp_path):
     assert index["summary"]["datasource_count"] == 1
     assert index["summary"]["measure_count"] == 12
     assert index["summary"]["status_counts"]["READY"] > 0
+
+
+def test_tableau_table_count_field_is_a_row_count():
+    datasource_ir = {
+        "workflow_run_id": "run", "datasource_id": "ds", "datasource_name": "Sales", "source_path": "/Volumes/a/b/c/d.tds",
+        "document_path": "d.tds", "package_hash": "0" * 64, "parameters": [], "calculations": [], "relations": [], "relationships": [],
+        "fields": [
+            {"field_id": "[__tableau_internal_object_id__].[Orders_27BA4ABADA204F3DB93FDC2725F0E5E2]", "name": "Orders",
+             "role": "measure", "datatype": "integer", "default_aggregation": "sum"},
+            {"field_id": "[Sales]", "name": "Sales", "role": "measure", "datatype": "real", "default_aggregation": "sum"},
+        ],
+    }
+
+    measures = {item["display_name"]: item["aggregation"] for item in compile_metric_ir(datasource_ir)["measures"]}
+
+    assert measures == {"Orders": "ROW_COUNT", "Sales": "SUM"}

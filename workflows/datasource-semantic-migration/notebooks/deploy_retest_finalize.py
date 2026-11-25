@@ -110,6 +110,7 @@ evaluation = evaluate_candidate(
     target_profile=target_profile,
     query_results=query_results,
     excluded_measures=initial_exclusions,
+    allowed_tables=manifest["target_tables"],
 )
 initial_evaluation = json.loads((attempt_dir / "evaluation-summary.json").read_text(encoding="utf-8"))
 before_query_results = json.loads((attempt_dir / "query-results-before.json").read_text(encoding="utf-8"))

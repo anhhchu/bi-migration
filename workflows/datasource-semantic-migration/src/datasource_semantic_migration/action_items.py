@@ -133,6 +133,18 @@ def _scorecard_item(
             "Correct the expression in groups/<group>/metric-view.yaml, then run the Datasource semantic repair Job.",
             blocking=True, **extra,
         )
+    if "DUPLICATE_MEASURE_NAME" in codes:
+        return "business_definition", _item(
+            name, f"Two {source} datasources in this group define a measure with this name differently; a Metric View can hold only one.",
+            "Decide which definition is authoritative, or rename one in metric-view.yaml, then run the Datasource semantic repair Job.",
+            blocking=True, **extra,
+        )
+    if "QUERY_NOT_RUN" in codes:
+        return "access_platform", _item(
+            name, "The measure exists, but its test query has no recorded result, so it is unverified.",
+            "Run the Datasource semantic repair Job again; if it stays unverified, report it as a workflow issue.",
+            blocking=True, **extra,
+        )
     if "UNSUPPORTED_METRIC_SHAPE" in codes:
         return "business_definition", _item(
             name, f"Uses a {source} feature with no Metric View equivalent.",
@@ -234,6 +246,24 @@ def build_action_groups(
                 blocking=True,
             )
         )
+
+    # Per-measure checks replace most import errors, but not these: repair cannot change them.
+    lasting_codes = {"DISALLOWED_LINEAGE", "APPROVED_LINEAGE_NOT_FOUND", "METRIC_YAML_INVALID"}
+    for finding in evaluation_findings:
+        if (
+            scorecard_evaluation
+            and finding.get("severity") == "ERROR"
+            and finding.get("code") in lasting_codes
+        ):
+            tables = ", ".join(str(table) for table in finding.get("tables") or finding.get("allowed_tables") or [])
+            buckets["data_mapping"].append(
+                _item(
+                    str(finding.get("code")).replace("_", " ").capitalize(),
+                    str(finding.get("message") or (f"Tables: {tables}." if tables else finding.get("code"))),
+                    "Fix the tables the Metric View reads so they match table-mapping.yaml, then propose again.",
+                    blocking=True,
+                )
+            )
 
     if not scorecard_evaluation:
         for finding in evaluation_findings:

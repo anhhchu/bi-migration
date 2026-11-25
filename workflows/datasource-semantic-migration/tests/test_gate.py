@@ -93,3 +93,19 @@ def test_missing_candidate_blocks_at_translation():
 
     assert result["status"] == "BLOCKED"
     assert statuses(result)["translation"] == "FAIL"
+
+
+def test_unmet_repair_gates_keep_the_gate_from_reporting_ready():
+    result = gate(
+        scorecard_evaluation={
+            "scorecards": [{"status": "PASS_SEMANTIC_ONLY"}],
+            "blocking_findings": [],
+            "relationship_blockers": [],
+            "gates": {"overall_metric_translation_coverage": False, "measure_queryability": True},
+        }
+    )
+
+    design = next(stage for stage in result["stages"] if stage["key"] == "design")
+    assert result["status"] == "NEEDS_REVIEW"
+    assert design["status"] == "WARN"
+    assert "overall metric translation coverage" in design["summary"]

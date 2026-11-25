@@ -80,6 +80,8 @@ TABLE_CALCULATION_FUNCTIONS = {
     "WINDOW_VARP",
 }
 NUMERIC_TYPES = {"decimal", "integer", "number", "real"}
+# Field IDs of Tableau's automatic per-table row-count fields (formerly "Number of Records").
+ROW_COUNT_FIELD_PREFIX = "[__tableau_internal_object_id__]"
 MEASURE_AGGREGATIONS = {
     "average": "AVG",
     "avg": "AVG",
@@ -352,6 +354,9 @@ def compile_metric_ir(datasource_ir: dict[str, Any]) -> dict[str, Any]:
     for field in datasource_ir["fields"]:
         if _base_field_is_measure(field):
             aggregation = MEASURE_AGGREGATIONS.get((field.get("default_aggregation") or "sum").casefold(), "SUM")
+            if str(field.get("field_id", "")).startswith(ROW_COUNT_FIELD_PREFIX):
+                # Tableau's automatic "<table>" count field: SUM of an internal 1 per row, i.e. a row count.
+                aggregation = "ROW_COUNT"
             measures.append(
                 {
                     "measure_id": _stable_id("measure", datasource_ir["datasource_id"], field["field_id"]),

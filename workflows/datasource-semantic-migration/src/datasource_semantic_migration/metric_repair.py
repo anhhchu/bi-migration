@@ -21,6 +21,37 @@ AGGREGATE_PATTERN = re.compile(
 )
 # A bare column reference, the only expression the deterministic patch can wrap in SUM() safely.
 BARE_COLUMN_PATTERN = re.compile(r"`[^`]+`|[A-Za-z_][A-Za-z0-9_]*")
+# Aggregate families: a source field's default aggregation and the SQL functions that satisfy it.
+# Only base fields are checked: calculations are often rewritten legitimately (LOD values taken with
+# MAX, ratios built from MEASURE()), which this check cannot tell apart from mistakes.
+SOURCE_AGGREGATE_FAMILIES = {
+    "SUM": "SUM", "AVG": "AVG", "AVERAGE": "AVG", "COUNT": "COUNT", "COUNT_DISTINCT": "COUNT_DISTINCT",
+    "COUNTD": "COUNT_DISTINCT", "MIN": "MIN", "MAX": "MAX", "MEDIAN": "MEDIAN", "STDEV": "STDDEV",
+    "STDEVP": "STDDEV", "VAR": "VARIANCE", "VARP": "VARIANCE", "PERCENTILE": "PERCENTILE",
+    "ROW_COUNT": "ROW_COUNT",
+}
+SATISFYING_FAMILIES = {
+    # A row count may be written COUNT(1), COUNT(*), COUNT_IF, a SUM of 1s, or COUNT(DISTINCT key) across joins.
+    "ROW_COUNT": {"COUNT", "COUNT_IF", "SUM", "COUNT_DISTINCT"},
+    "SUM": {"SUM", "COUNT_IF"},
+    "COUNT": {"COUNT", "COUNT_IF", "SUM"},
+    "COUNT_DISTINCT": {"COUNT_DISTINCT"},
+    "AVG": {"AVG"},
+    "MIN": {"MIN"},
+    "MAX": {"MAX"},
+    "MEDIAN": {"MEDIAN", "PERCENTILE"},
+    "STDDEV": {"STDDEV"},
+    "VARIANCE": {"VARIANCE"},
+    "PERCENTILE": {"PERCENTILE", "MEDIAN"},
+}
+# Totals written with higher-order functions (often to avoid double counting across joins) cannot be read.
+UNREADABLE_AGGREGATION_PATTERN = re.compile(r"\b(AGGREGATE|REDUCE|COLLECT_SET|COLLECT_LIST|ARRAY_AGG)\s*\(", re.IGNORECASE)
+TARGET_FUNCTION_PATTERN = re.compile(r"\b([A-Za-z_]+)\s*\(\s*(DISTINCT\b)?", re.IGNORECASE)
+TARGET_FUNCTION_FAMILIES = {
+    "SUM": "SUM", "AVG": "AVG", "MEAN": "AVG", "COUNT": "COUNT", "COUNT_IF": "COUNT_IF", "MIN": "MIN",
+    "MAX": "MAX", "MEDIAN": "MEDIAN", "VARIANCE": "VARIANCE", "VAR_POP": "VARIANCE", "VAR_SAMP": "VARIANCE",
+}
+SINGLE_AGGREGATE_PATTERN = re.compile(r"^\s*([A-Za-z_]+)\s*\(\s*(DISTINCT\s+)?(`[^`]+`|[A-Za-z_][A-Za-z0-9_]*)\s*\)\s*$", re.IGNORECASE)
 # Dispositions that settle a measure without a target: they need a person, not a repair.
 EXCLUSION_STATUSES = {"EXCLUDED_UNSUPPORTED", "EXCLUDED_BY_IMPORT", "NOT_COMPARABLE"}
 FQN_PATTERN = re.compile(r"(?<![A-Za-z0-9_])(?:`([^`]+)`|([A-Za-z_][\w-]*))\."
@@ -53,21 +84,101 @@ def metric_view_yaml(document: dict[str, Any]) -> str:
     return yaml.safe_dump(document, sort_keys=False, width=120)
 
 
+def _join_sources(document: dict[str, Any]) -> list[str]:
+    sources = [str(document.get("source") or "")]
+    for join in document.get("joins") or []:
+        if isinstance(join, dict):
+            sources.extend(_join_sources(join))
+    return sources
+
+
 def target_lineage(document: dict[str, Any]) -> list[str]:
-    source = str(document.get("source", ""))
+    """Every table the Metric View reads: its source and the source of every join, at any depth."""
     matches = []
-    for match in FQN_PATTERN.finditer(source):
-        parts = [match.group(1) or match.group(2), match.group(3) or match.group(4), match.group(5) or match.group(6)]
-        matches.append(".".join(parts))
+    for source in _join_sources(document):
+        for match in FQN_PATTERN.finditer(source):
+            parts = [match.group(1) or match.group(2), match.group(3) or match.group(4), match.group(5) or match.group(6)]
+            matches.append(".".join(parts))
     return sorted(set(matches))
 
 
-def _source_measure_index(source_metric_irs: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
-    result = {}
+def disallowed_tables(document: dict[str, Any], allowed_tables: Iterable[str]) -> list[str]:
+    allowed = {table.casefold() for table in allowed_tables}
+    return [table for table in target_lineage(document) if table.casefold() not in allowed]
+
+
+def _definition(measure: dict[str, Any]) -> tuple[Any, Any]:
+    expression = measure.get("expression") or {}
+    return (measure.get("aggregation"), " ".join(str(expression.get("formula") or "").split()).casefold())
+
+
+def _source_measure_index(
+    source_metric_irs: list[dict[str, Any]],
+) -> tuple[dict[str, dict[str, Any]], list[tuple[str, dict[str, Any]]]]:
+    """Source measures by name, plus same-named measures whose definitions differ (a Metric View holds one)."""
+    result: dict[str, dict[str, Any]] = {}
+    conflicts = []
     for metric_ir in source_metric_irs:
         for measure in metric_ir.get("measures", []):
-            result.setdefault(normalized_name(measure.get("display_name")), measure)
-    return result
+            key = normalized_name(measure.get("display_name"))
+            if key not in result:
+                result[key] = measure
+            elif _definition(measure) != _definition(result[key]):
+                conflicts.append((key, measure))
+    return result, conflicts
+
+
+def _expected_families(source: dict[str, Any]) -> set[str]:
+    """Aggregate families the source measure uses; empty when they cannot be known."""
+    if (source.get("expression") or {}).get("kind") != "field_aggregate":
+        return set()
+    family = SOURCE_AGGREGATE_FAMILIES.get(str(source.get("aggregation") or "").upper())
+    return {family} if family else set()
+
+
+def _target_families(expression: str) -> set[str] | None:
+    """Aggregate families used in a target expression, or None when they cannot be read reliably."""
+    if UNREADABLE_AGGREGATION_PATTERN.search(expression):
+        return None
+    families = set()
+    for match in TARGET_FUNCTION_PATTERN.finditer(expression):
+        name = match.group(1).upper()
+        if name == "MEASURE":
+            return None
+        if name == "COUNT" and match.group(2):
+            families.add("COUNT_DISTINCT")
+        elif name.startswith("PERCENTILE"):
+            families.add("PERCENTILE")
+        elif name.startswith("STDDEV"):
+            families.add("STDDEV")
+        elif name in TARGET_FUNCTION_FAMILIES:
+            families.add(TARGET_FUNCTION_FAMILIES[name])
+    return families
+
+
+def _family_sql(family: str, column: str) -> str:
+    return f"COUNT(DISTINCT {column})" if family == "COUNT_DISTINCT" else f"{family}({column})"
+
+
+def _aggregation_difference(source: dict[str, Any], target_expression: str) -> dict[str, Any] | None:
+    """How the target aggregates differently from the source, with a safe rewrite when there is one."""
+    if source.get("status") == "NEEDS_AGGREGATION_COMPILATION":
+        if AGGREGATE_PATTERN.search(target_expression):
+            return None
+        suggestion = f"SUM({target_expression.strip()})" if _is_bare_column(target_expression) else None
+        return {"field": "aggregation", "source": "SOURCE_DEFAULT", "target": target_expression, "suggested": suggestion}
+    expected = _expected_families(source)
+    found = _target_families(target_expression)
+    if not expected or found is None:
+        return None
+    missing = sorted(family for family in expected if not (SATISFYING_FAMILIES.get(family, {family}) & found))
+    if not missing:
+        return None
+    suggestion = None
+    single = SINGLE_AGGREGATE_PATTERN.match(target_expression)
+    if single and missing[0] != "ROW_COUNT":
+        suggestion = _family_sql(missing[0], single.group(3))
+    return {"field": "aggregation", "source": ", ".join(missing), "target": target_expression, "suggested": suggestion}
 
 
 def _target_measure_index(metric_view: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -114,16 +225,19 @@ def evaluate_candidate(
     query_results: dict[str, Any] | None = None,
     policy: dict[str, Any] | None = None,
     excluded_measures: Iterable[str] = (),
+    allowed_tables: Iterable[str] | None = None,
 ) -> dict[str, Any]:
     """Score each source measure against the candidate.
 
     excluded_measures names measures the import left out on purpose, with a reason; they need a
-    person's decision, so repair does not try to translate them.
+    person's decision, so repair does not try to translate them. allowed_tables, when given, are
+    the approved mapping's tables; reading any other table blocks the candidate.
     """
     policy = {**DEFAULT_POLICY, **(policy or {})}
-    query_results = query_results or {}
+    # Match query results by normalized name, however the caller keyed them.
+    query_results = {normalized_name(str(name)): result for name, result in (query_results or {}).items()}
     excluded = {normalized_name(name) for name in excluded_measures}
-    source_measures = _source_measure_index(source_metric_irs)
+    source_measures, conflicting_measures = _source_measure_index(source_metric_irs)
     target_measures = _target_measure_index(metric_view)
     scorecards = []
     for key, source in sorted(source_measures.items()):
@@ -153,18 +267,22 @@ def evaluate_candidate(
             repair_route = "GENIE_PATCH"
         else:
             target_expression = str(target.get("expr", ""))
-            if source.get("status") == "NEEDS_AGGREGATION_COMPILATION" and not AGGREGATE_PATTERN.search(target_expression):
+            difference = _aggregation_difference(source, target_expression)
+            if difference:
                 status = "FAILED_SEMANTICS"
                 failure_codes = ["AGGREGATION_MISMATCH"]
-                # Only a bare column can be wrapped in SUM() safely; anything else needs Genie.
-                repair_route = (
-                    "DETERMINISTIC_METRIC_PATCH" if _is_bare_column(target_expression) else "GENIE_PATCH"
-                )
-                differences.append({"field": "aggregation", "source": "SOURCE_DEFAULT", "target": target_expression})
+                # A safe rewrite exists only for a single aggregate of a bare column; otherwise Genie.
+                repair_route = "DETERMINISTIC_METRIC_PATCH" if difference["suggested"] else "GENIE_PATCH"
+                differences.append(difference)
             elif query_status == "FAIL":
                 status = "FAILED_VALUE"
                 failure_codes = ["MEASURE_QUERY_FAILED"]
                 repair_route = "GENIE_PATCH"
+            elif query_status != "PASS":
+                # No query evidence means the measure is unverified, not passing.
+                status = "FAILED_VALUE"
+                failure_codes = ["QUERY_NOT_RUN"]
+                repair_route = "EVALUATOR_CHECK"
             else:
                 status = "PASS_SEMANTIC_ONLY"
         scorecards.append(
@@ -187,9 +305,35 @@ def evaluate_candidate(
             }
         )
 
+    for key, source in conflicting_measures:
+        scorecards.append(
+            {
+                "metric_id": source.get("measure_id"),
+                "source_name": source.get("display_name"),
+                "target_name": None,
+                "criticality": "standard",
+                "status": "FAILED_SEMANTICS",
+                "evidence_level": "NONE",
+                "translation": {"status": "CONFLICT", "differences": [{"field": "definition", "source": key}]},
+                "relationship_safety": {"status": "PASS"},
+                "queryability": "NOT_APPLICABLE",
+                "query": {"status": "NOT_APPLICABLE", "reason": "Another measure with this name was evaluated instead."},
+                "failure_codes": ["DUPLICATE_MEASURE_NAME"],
+                "repair_route": "HUMAN_DECISION",
+                "dependencies": source.get("dependencies", []),
+                "source": source,
+                "target": None,
+            }
+        )
+
     relationship_blockers = [
         item for item in target_profile.get("relationships", []) if item.get("status") == "BLOCKED"
     ]
+    if allowed_tables is not None:
+        relationship_blockers.extend(
+            {"name": f"Reads {table}", "status": "BLOCKED", "reason": f"{table} is not a table in the approved mapping."}
+            for table in disallowed_tables(metric_view, allowed_tables)
+        )
     passed = [item for item in scorecards if item["status"].startswith("PASS_")]
     excluded_scorecards = [item for item in scorecards if item["status"] in EXCLUSION_STATUSES]
     governed = [item for item in scorecards if item["status"].startswith("PASS_")] + excluded_scorecards
@@ -356,13 +500,20 @@ def build_deterministic_patch(evaluation: dict[str, Any], metric_view: dict[str,
             continue
         target = scorecard.get("target") or {}
         expression = str(target.get("expr", "")).strip()
-        if _is_bare_column(expression):
+        suggestions = [
+            item.get("suggested")
+            for item in scorecard.get("translation", {}).get("differences", [])
+            if item.get("field") == "aggregation" and item.get("suggested")
+        ]
+        # Older evaluations carry no suggestion; a bare column still gets the SUM default.
+        after = suggestions[0] if suggestions else (f"SUM({expression})" if _is_bare_column(expression) else None)
+        if after:
             operations.append(
                 {
                     "op": "set_measure_expression",
                     "measure": target.get("name"),
                     "before": expression,
-                    "after": f"SUM({expression})",
+                    "after": after,
                     "failure_codes": ["AGGREGATION_MISMATCH"],
                 }
             )

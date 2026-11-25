@@ -423,6 +423,14 @@ METRIC_STATUS_GUIDE = {
 }
 
 FAILURE_CODE_GUIDE = {
+    "QUERY_NOT_RUN": {
+        "meaning": "The target measure exists, but its test query has no recorded result.",
+        "action": "Run the Datasource semantic repair Job again. An unverified measure does not count as passing.",
+    },
+    "DUPLICATE_MEASURE_NAME": {
+        "meaning": "Two datasources in the group define a measure with this name differently.",
+        "action": "Decide which definition is authoritative or rename one in metric-view.yaml, then rerun repair.",
+    },
     "EXCLUDED_WITH_REASON": {
         "meaning": "The import left this {source} measure out on purpose; its reason is listed with the items not migrated.",
         "action": "Accept it as not migrated, rebuild it in the dashboard, or build it as a SQL view. Repair does not retry it.",
@@ -443,12 +451,12 @@ FAILURE_CODE_GUIDE = {
     },
     "AGGREGATION_MISMATCH": {
         "meaning": (
-            "{source} calculates this formula per row, so the Metric View must say how to total it "
-            "(SUM, AVG, COUNT, or built from other measures with MEASURE()). The generated expression does neither."
+            "The Metric View totals this measure differently from {source}: either it has no aggregate at all, "
+            "or it uses a different one (for example SUM where {source} uses AVG or COUNTD)."
         ),
         "action": (
-            "Wrap the expression in the aggregate your reports use, e.g. SUM(<expression>), in "
-            "groups/<group>/metric-view.yaml, then run the Datasource semantic repair Job."
+            "Repair rewrites a single aggregate of one column automatically. Otherwise use the aggregate {source} "
+            "uses in groups/<group>/metric-view.yaml, then run the Datasource semantic repair Job."
         ),
     },
     "MEASURE_QUERY_FAILED": {

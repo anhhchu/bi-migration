@@ -5,6 +5,7 @@ from pathlib import Path
 
 import yaml
 
+from datasource_semantic_migration.metric_repair import disallowed_tables, target_lineage
 from datasource_semantic_migration.notebook_results import format_notebook_result, render_volume_links_html
 from datasource_semantic_migration.artifacts import write_json_artifact
 
@@ -55,7 +56,11 @@ if definition:
         findings.append(
             {"code": "METRIC_YAML_UNAVAILABLE", "severity": "WARNING", "message": "SHOW CREATE output has no YAML body"}
         )
-    allowed_lineage = [table for table in group_manifest["target_tables"] if table.casefold() in definition.casefold()]
+    # Exact table names from the deployed YAML (source and every join), not a text search.
+    # Without parsed YAML, fall back to the table names that appear in the definition text.
+    lineage_document = metric_document if metric_document else {"source": definition}
+    read_tables = {table.casefold() for table in target_lineage(lineage_document)}
+    allowed_lineage = [table for table in group_manifest["target_tables"] if table.casefold() in read_tables]
     if not allowed_lineage:
         findings.append(
             {
@@ -64,9 +69,14 @@ if definition:
                 "allowed_tables": group_manifest["target_tables"],
             }
         )
-    unexpected_tables = [
-        table for table in (agent_result or {}).get("source_tables_used", []) if table not in group_manifest["target_tables"]
-    ]
+    unexpected_tables = sorted(
+        set(disallowed_tables(metric_document or {}, group_manifest["target_tables"]) if metric_document else [])
+        | {
+            table
+            for table in (agent_result or {}).get("source_tables_used", [])
+            if table.casefold() not in {item.casefold() for item in group_manifest["target_tables"]}
+        }
+    )
     if unexpected_tables:
         findings.append({"code": "DISALLOWED_LINEAGE", "severity": "ERROR", "tables": unexpected_tables})
     if agent_result is None:

@@ -236,17 +236,21 @@ Each source business measure receives a scorecard containing its source name, ma
 
 The evaluator checks:
 
-1. **Translation presence** — a target measure matches the normalized Tableau display name.
-2. **Supported disposition** — missing external mappings and unsupported metric shapes are explicitly classified.
-3. **Aggregation structure** — row-level calculations requiring aggregation must contain an aggregate expression.
-4. **Relationship safety** — target-profile relationships marked `BLOCKED` prevent readiness.
-5. **Queryability** — every translated measure runs through:
+1. **Translation presence** — a target measure matches the normalized Tableau display name. When two datasources in a group define a measure with the same name differently, the second is flagged `DUPLICATE_MEASURE_NAME` for a person to decide; identical definitions are merged.
+2. **Supported disposition** — missing external mappings, unsupported metric shapes, and measures the import left out with a reason (`EXCLUDED_BY_IMPORT`) are explicitly classified.
+3. **Aggregation** — row-level calculations must contain an aggregate. A base field must use the same aggregate family as its Tableau default (SUM, AVG, COUNT, COUNTD, MIN, MAX); Tableau's automatic per-table count fields are row counts, satisfied by `COUNT(1)`, `COUNT(*)`, `COUNT_IF`, or `COUNT(DISTINCT key)`. A single aggregate of one column with the wrong function is rewritten automatically (for example `SUM(price)` → `AVG(price)`); other mismatches go to Genie. Calculations are not checked this way, because legitimate rewrites (LOD values taken with `MAX`, ratios built with `MEASURE()`) cannot be told apart from mistakes; neither are totals written with higher-order functions such as `AGGREGATE(... COLLECT_SET ...)`.
+4. **Approved tables** — the Metric View's `source` and every `joins[].source`, at any depth, must be tables in the approved mapping. This is checked after the import and after every repair.
+5. **Relationship safety** — target-profile relationships marked `BLOCKED` prevent readiness.
+6. **Queryability** — every translated measure runs through:
 
    ```sql
    SELECT MEASURE(`<measure>`) FROM `<catalog>`.`<schema>`.`<metric-view>`
    ```
 
-6. **Regression safety** — a repair cannot turn a previously passing measure query into a failing query.
+   A measure without a recorded query result is `QUERY_NOT_RUN`, not a pass.
+7. **Regression safety** — a repair cannot turn a previously passing measure query into a failing query.
+
+What these checks do not prove: a passing query shows the measure compiles and runs, not that its numbers match Tableau. A query without dimensions may not exercise joins, and filters and grain are not compared. Same aggregate family does not prove the same arguments, and calculations are not aggregation-checked (for example `SUM(a)/SUM(b)` translated as `SUM(a)` passes). Numeric parity with Tableau is the separate Parity stage.
 
 ### Coverage formulas
 
