@@ -254,7 +254,7 @@ The evaluator checks:
 |---|---|---:|
 | Translation coverage | translated target measures / source business measures | 95% |
 | Governed disposition coverage | passed, approved-excluded, or not-comparable measures / source measures | 100% |
-| Evidence coverage | measures with retained semantic-pass evidence / source measures | 100% |
+| Evidence coverage | measures with retained semantic-pass evidence / source measures not left out on purpose | 100% |
 | Measure queryability | successful measure queries / translated measures | 100% |
 | Unsafe relationships | target-profile relationships with `BLOCKED` status | 0 |
 | Blocking findings | unresolved mapping, semantic, or query failures | 0 |
@@ -275,9 +275,10 @@ Each group review also shows **semantic coverage**: translated dimensions and me
 
 Repair is deterministic first:
 
-- A bare field with an unambiguous missing aggregate can be patched to `SUM(field)`.
+- A bare field with an unambiguous missing aggregate can be patched to `SUM(field)`. Other expressions missing an aggregate go to Genie.
 - Missing supported measures or failed measure expressions may request a structured Genie patch.
-- External mappings, unsafe relationships, and unsupported metric shapes are not invented.
+- Measures the import left out on purpose (`items_not_translated`, with a reason) are scored `EXCLUDED_BY_IMPORT`. They wait for a person's decision; repair never sends them to Genie.
+- External mappings, unsafe relationships, and unsupported metric shapes are not invented. When one of these blocks the evaluation, Genie is not called, because the attempt would stop anyway.
 
 Current limitation: a failed measure query is routed to Genie without first separating expression errors from permissions, compute, missing-source, or evaluator failures. `METRIC-VIEW-EVALUATION-REPAIR-PLAN.md` defines the planned operational-error classifier and stricter Genie eligibility gate.
 
@@ -286,7 +287,7 @@ Every attempt snapshots the candidate, deploys changes at the same candidate FQN
 - a previously passing query regresses; or
 - translated, governed, evidenced, or query-passing counts do not improve and no blocker is removed.
 
-Another attempt starts only after measurable improvement. Otherwise the workflow stops with a specific result such as `NO_PROGRESS`, `BLOCKED_EVIDENCE`, `UNRESOLVABLE_AUTOMATICALLY`, `REGRESSION_REJECTED`, or `EXHAUSTED`.
+Another attempt starts only when it could do something new: there was measurable improvement, the set of failures changed, and at least one remaining failure is new to automatic repair (a deterministic fix, or a finding Genie has not yet seen in this attempt). Otherwise the workflow stops with a specific result such as `NO_PROGRESS`, `BLOCKED_EVIDENCE`, `UNRESOLVABLE_AUTOMATICALLY` (with the reason in `summary.json` → `stop_reason`), `REGRESSION_REJECTED`, or `EXHAUSTED`. The attempt limit is the repair Job's `max_attempts` parameter (default 3).
 
 The current evaluator does not compare Metric View results with Hyper or Tableau worksheet values. See `METRIC-VIEW-EVALUATION-REPAIR-PLAN.md` for planned extensions and current repair limitations.
 

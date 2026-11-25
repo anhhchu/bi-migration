@@ -416,9 +416,17 @@ METRIC_STATUS_GUIDE = {
         "meaning": "The source item is intentionally excluded under a governed unsupported-item disposition.",
         "limitation": "It counts as governed, but not translated or evidenced.",
     },
+    "EXCLUDED_BY_IMPORT": {
+        "meaning": "The import left this measure out on purpose and gave a reason.",
+        "limitation": "It counts as governed, not translated. A person decides whether leaving it out is acceptable.",
+    },
 }
 
 FAILURE_CODE_GUIDE = {
+    "EXCLUDED_WITH_REASON": {
+        "meaning": "The import left this {source} measure out on purpose; its reason is listed with the items not migrated.",
+        "action": "Accept it as not migrated, rebuild it in the dashboard, or build it as a SQL view. Repair does not retry it.",
+    },
     "MISSING_TARGET_MEASURE": {
         "meaning": "This {source} measure has no matching measure in the Metric View.",
         "action": (
@@ -482,9 +490,9 @@ COVERAGE_GATE_GUIDE = {
     "evidence_coverage": {
         "label": "Evidence Coverage",
         "numerator": "evidenced_metric_count",
-        "denominator": "source_business_metric_count",
+        "denominator": "evidence_candidate_count",
         "threshold": "retained_metric_evidence_coverage",
-        "definition": "Source metrics with retained passing evidence. Semantic-only evidence proves structure, not {source} numeric parity.",
+        "definition": "Source metrics with retained passing evidence, not counting measures left out on purpose. Semantic-only evidence proves structure, not {source} numeric parity.",
     },
     "measure_queryability": {
         "label": "Measure Queryability",
@@ -592,6 +600,8 @@ def build_repair_review(*, summary: dict[str, Any], evaluation: dict[str, Any], 
                 or "The repair changed the candidate but did not improve coverage or remove a blocker, so retry stopped."
             ),
         )
+    if summary.get("stop_reason"):
+        decision_reasons.insert(0, f"Automatic repair stopped: {summary['stop_reason']}")
     if summary.get("rolled_back"):
         decision_reasons.insert(
             0,

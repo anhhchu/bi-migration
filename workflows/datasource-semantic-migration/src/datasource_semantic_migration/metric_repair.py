@@ -4,9 +4,13 @@ import copy
 import hashlib
 import json
 import re
+from collections.abc import Iterable
+from pathlib import Path
 from typing import Any
 
 import yaml
+
+from .action_items import entry_names
 
 
 # MEASURE() composes already-aggregated measures, so it satisfies Tableau's aggregation requirement.
@@ -15,6 +19,10 @@ AGGREGATE_PATTERN = re.compile(
     r"|STDDEV\w*|VARIANCE|VAR_POP|VAR_SAMP|ANY_VALUE|FIRST|LAST|MIN_BY|MAX_BY|BOOL_AND|BOOL_OR)\s*\(",
     re.IGNORECASE,
 )
+# A bare column reference, the only expression the deterministic patch can wrap in SUM() safely.
+BARE_COLUMN_PATTERN = re.compile(r"`[^`]+`|[A-Za-z_][A-Za-z0-9_]*")
+# Dispositions that settle a measure without a target: they need a person, not a repair.
+EXCLUSION_STATUSES = {"EXCLUDED_UNSUPPORTED", "EXCLUDED_BY_IMPORT", "NOT_COMPARABLE"}
 FQN_PATTERN = re.compile(r"(?<![A-Za-z0-9_])(?:`([^`]+)`|([A-Za-z_][\w-]*))\."
                          r"(?:`([^`]+)`|([A-Za-z_][\w-]*))\."
                          r"(?:`([^`]+)`|([A-Za-z_][\w-]*))")
@@ -105,9 +113,16 @@ def evaluate_candidate(
     target_profile: dict[str, Any],
     query_results: dict[str, Any] | None = None,
     policy: dict[str, Any] | None = None,
+    excluded_measures: Iterable[str] = (),
 ) -> dict[str, Any]:
+    """Score each source measure against the candidate.
+
+    excluded_measures names measures the import left out on purpose, with a reason; they need a
+    person's decision, so repair does not try to translate them.
+    """
     policy = {**DEFAULT_POLICY, **(policy or {})}
     query_results = query_results or {}
+    excluded = {normalized_name(name) for name in excluded_measures}
     source_measures = _source_measure_index(source_metric_irs)
     target_measures = _target_measure_index(metric_view)
     scorecards = []
@@ -124,6 +139,10 @@ def evaluate_candidate(
             status = "BLOCKED_UNRESOLVED_MAPPING"
             failure_codes = ["EXTERNAL_DATASOURCE_UNMAPPED"]
             repair_route = "MAPPING_REVISION"
+        elif target is None and key in excluded:
+            status = "EXCLUDED_BY_IMPORT"
+            failure_codes = ["EXCLUDED_WITH_REASON"]
+            repair_route = "HUMAN_DECISION"
         elif target is None and source.get("status") == "UNSUPPORTED":
             status = "EXCLUDED_UNSUPPORTED"
             failure_codes = ["UNSUPPORTED_METRIC_SHAPE"]
@@ -137,7 +156,10 @@ def evaluate_candidate(
             if source.get("status") == "NEEDS_AGGREGATION_COMPILATION" and not AGGREGATE_PATTERN.search(target_expression):
                 status = "FAILED_SEMANTICS"
                 failure_codes = ["AGGREGATION_MISMATCH"]
-                repair_route = "DETERMINISTIC_METRIC_PATCH"
+                # Only a bare column can be wrapped in SUM() safely; anything else needs Genie.
+                repair_route = (
+                    "DETERMINISTIC_METRIC_PATCH" if _is_bare_column(target_expression) else "GENIE_PATCH"
+                )
                 differences.append({"field": "aggregation", "source": "SOURCE_DEFAULT", "target": target_expression})
             elif query_status == "FAIL":
                 status = "FAILED_VALUE"
@@ -169,28 +191,29 @@ def evaluate_candidate(
         item for item in target_profile.get("relationships", []) if item.get("status") == "BLOCKED"
     ]
     passed = [item for item in scorecards if item["status"].startswith("PASS_")]
-    governed = [
-        item
-        for item in scorecards
-        if item["status"].startswith("PASS_") or item["status"] in {"EXCLUDED_UNSUPPORTED", "NOT_COMPARABLE"}
-    ]
+    excluded_scorecards = [item for item in scorecards if item["status"] in EXCLUSION_STATUSES]
+    governed = [item for item in scorecards if item["status"].startswith("PASS_")] + excluded_scorecards
     translated = [item for item in scorecards if item["target_name"] is not None]
     query_passed = [item for item in translated if item["queryability"] == "PASS"]
     query_failed = [item for item in translated if item["queryability"] == "FAIL"]
     query_not_run = [item for item in translated if item["queryability"] == "NOT_RUN"]
     total = len(scorecards)
+    # Settled exclusions cannot carry passing evidence, so they are not counted against it.
+    evidence_candidates = total - len(excluded_scorecards)
     coverage = {
         "source_business_metric_count": total,
         "translated_metric_count": len(translated),
         "governed_metric_count": len(governed),
         "evidenced_metric_count": len(passed),
+        "evidence_candidate_count": evidence_candidates,
+        "excluded_metric_count": len(excluded_scorecards),
         "query_candidate_count": len(translated),
         "query_pass_count": len(query_passed),
         "query_fail_count": len(query_failed),
         "query_not_run_count": len(query_not_run),
         "translation_coverage": len(translated) / total if total else 0.0,
         "governed_disposition_coverage": len(governed) / total if total else 0.0,
-        "evidence_coverage": len(passed) / total if total else 0.0,
+        "evidence_coverage": len(passed) / evidence_candidates if evidence_candidates else (1.0 if total else 0.0),
         "measure_queryability": len(query_passed) / len(translated) if translated else 0.0,
     }
     blocking = [
@@ -198,11 +221,12 @@ def evaluate_candidate(
         for item in scorecards
         if item["status"] in {"BLOCKED_UNRESOLVED_MAPPING", "FAILED_SEMANTICS", "FAILED_VALUE"}
     ]
-    needs_genie = any(item["repair_route"] == "GENIE_PATCH" for item in blocking)
     deterministic_repairs = any(item["repair_route"] == "DETERMINISTIC_METRIC_PATCH" for item in blocking)
     blocked_evidence = bool(relationship_blockers) or any(
         item["status"] == "BLOCKED_UNRESOLVED_MAPPING" for item in blocking
     )
+    # A mapping or relationship blocker stops the attempt anyway, so Genie output would be discarded.
+    needs_genie = not blocked_evidence and any(item["repair_route"] == "GENIE_PATCH" for item in blocking)
     gates = {
         "overall_metric_translation_coverage": coverage["translation_coverage"]
         >= policy["overall_metric_translation_coverage"],
@@ -236,8 +260,55 @@ def evaluate_candidate(
         "needs_genie": needs_genie,
         "has_deterministic_repairs": deterministic_repairs,
         "failure_signature": document_hash(signature_basis),
+        "excluded_measures": sorted(excluded),
         "policy": policy,
     }
+
+
+def import_exclusions(import_result_path: str | Path) -> list[str]:
+    """Field names the import left out on purpose (items_not_translated), read from importbi-result.json."""
+    path = Path(import_result_path)
+    if not path.is_file():
+        return []
+    document = json.loads(path.read_text(encoding="utf-8")) or {}
+    return [name for entry in document.get("items_not_translated") or [] for name in entry_names(entry)]
+
+
+def _is_bare_column(expression: str) -> bool:
+    return BARE_COLUMN_PATTERN.fullmatch(expression.strip()) is not None
+
+
+def next_attempt_decision(
+    before: dict[str, Any], after: dict[str, Any], *, genie_ran: bool
+) -> dict[str, Any]:
+    """Whether another repair attempt could do something this attempt did not.
+
+    before and after are evaluations of one attempt. A retry repeats the same deterministic patch
+    and, for findings Genie already saw, the same Genie request, so it only helps when the failures
+    changed and some finding is new to both.
+    """
+    remaining = after.get("blocking_findings", [])
+    if not remaining:
+        return {"retry": False, "reason": "No failure is left that automatic repair can act on."}
+    if after.get("failure_signature") == before.get("failure_signature"):
+        return {"retry": False, "reason": "The same failures remain after this attempt, so another attempt would repeat it."}
+    sent_to_genie = (
+        {item.get("metric_id") for item in before.get("blocking_findings", []) if item.get("repair_route") == "GENIE_PATCH"}
+        if genie_ran
+        else set()
+    )
+    new_work = [
+        item
+        for item in remaining
+        if item.get("repair_route") == "DETERMINISTIC_METRIC_PATCH"
+        or (item.get("repair_route") == "GENIE_PATCH" and item.get("metric_id") not in sent_to_genie)
+    ]
+    if not new_work:
+        return {
+            "retry": False,
+            "reason": "Genie already saw every remaining failure in this attempt and could not fix it.",
+        }
+    return {"retry": True, "reason": f"{len(new_work)} remaining failure(s) are new to automatic repair."}
 
 
 def evaluate_progress(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
@@ -285,7 +356,7 @@ def build_deterministic_patch(evaluation: dict[str, Any], metric_view: dict[str,
             continue
         target = scorecard.get("target") or {}
         expression = str(target.get("expr", "")).strip()
-        if re.fullmatch(r"`?[A-Za-z_][A-Za-z0-9_ ]*`?", expression):
+        if _is_bare_column(expression):
             operations.append(
                 {
                     "op": "set_measure_expression",

@@ -10,6 +10,9 @@ from datasource_semantic_migration.metric_repair import (
     document_hash,
     evaluate_candidate,
     evaluate_progress,
+    import_exclusions,
+    next_attempt_decision,
+    normalized_name,
     target_lineage,
 )
 from datasource_semantic_migration.notebook_results import format_notebook_result, render_volume_links_html
@@ -93,15 +96,20 @@ for measure in candidate.get("measures", []):
     query_sql = f"SELECT MEASURE(`{escaped_name}`) FROM {quoted_fqn}"
     try:
         spark.sql(query_sql).limit(1).collect()
-        query_results[name.casefold()] = {"status": "PASS", "sql": query_sql}
+        query_results[normalized_name(name)] = {"status": "PASS", "sql": query_sql}
     except Exception as error:
-        query_results[name.casefold()] = {"status": "FAIL", "sql": query_sql, "error": str(error)[:1000]}
+        query_results[normalized_name(name)] = {"status": "FAIL", "sql": query_sql, "error": str(error)[:1000]}
 
+# Use the same exclusions as the snapshot so before and after are comparable.
+initial_exclusions = json.loads((attempt_dir / "evaluation-summary.json").read_text(encoding="utf-8")).get(
+    "excluded_measures"
+) or import_exclusions(group_internal_path / "importbi-result.json")
 evaluation = evaluate_candidate(
     source_metric_irs=source_metric_irs,
     metric_view=candidate,
     target_profile=target_profile,
     query_results=query_results,
+    excluded_measures=initial_exclusions,
 )
 initial_evaluation = json.loads((attempt_dir / "evaluation-summary.json").read_text(encoding="utf-8"))
 before_query_results = json.loads((attempt_dir / "query-results-before.json").read_text(encoding="utf-8"))
@@ -145,6 +153,8 @@ write_json_artifact(
 write_json_artifact(evaluation, attempt_dir / "evaluation-after.json")
 
 next_run_id = None
+decision = next_attempt_decision(initial_evaluation, evaluation, genie_ran=genie_patch is not None)
+stop_reason = None
 if evaluation["readiness"] == "READY":
     status = "READY"
 elif genie_patch and genie_patch["status"] == "UNRESOLVABLE":
@@ -157,6 +167,9 @@ elif not progress["measurable_improvement"]:
     status = "NO_PROGRESS"
 elif attempt >= max_attempts:
     status = "EXHAUSTED"
+elif not decision["retry"]:
+    status = "UNRESOLVABLE_AUTOMATICALLY"
+    stop_reason = decision["reason"]
 else:
     status = "RETRYING"
     response = WorkspaceClient().jobs.run_now(
@@ -193,6 +206,8 @@ summary = {
     "rolled_back": rolled_back,
     "rollback_reason": rollback_reason,
     "progress": progress,
+    "retry_decision": decision,
+    "stop_reason": stop_reason,
     "next_run_id": next_run_id,
     "attempt_dir": str(attempt_dir),
 }

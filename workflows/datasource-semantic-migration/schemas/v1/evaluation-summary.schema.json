@@ -9,7 +9,7 @@
     "workflow_run_id": {"type": "string"},
     "group_id": {"type": "string"},
     "metric_view_fqn": {"type": "string"},
-    "status": {"enum": ["PASS_EXACT", "PASS_WITH_TOLERANCE", "PASS_SOURCE_FIXTURE", "PASS_SEMANTIC_ONLY", "PASS_INVARIANTS_ONLY", "NOT_COMPARABLE_NO_SOURCE_DATA", "BLOCKED_UNRESOLVED_MAPPING", "BLOCKED_UNSAFE_GRAIN", "FAILED_SEMANTICS", "FAILED_VALUE", "EXCLUDED_UNSUPPORTED"]},
+    "status": {"enum": ["PASS_EXACT", "PASS_WITH_TOLERANCE", "PASS_SOURCE_FIXTURE", "PASS_SEMANTIC_ONLY", "PASS_INVARIANTS_ONLY", "NOT_COMPARABLE_NO_SOURCE_DATA", "BLOCKED_UNRESOLVED_MAPPING", "BLOCKED_UNSAFE_GRAIN", "FAILED_SEMANTICS", "FAILED_VALUE", "EXCLUDED_UNSUPPORTED", "EXCLUDED_BY_IMPORT"]},
     "evidence_strength": {"enum": ["EXACT", "SOURCE_FIXTURE", "SEMANTIC", "INVARIANT", "NONE"]},
     "blocking_findings": {"type": "array", "items": {"type": "string"}},
     "warnings": {"type": "array", "items": {"type": "string"}},

@@ -4,6 +4,8 @@ from datasource_semantic_migration.metric_repair import (
     create_metric_view_sql,
     evaluate_candidate,
     evaluate_progress,
+    import_exclusions,
+    next_attempt_decision,
     target_lineage,
 )
 
@@ -162,3 +164,107 @@ def test_measures_composed_from_other_measures_count_as_aggregated():
 
     statuses = {item["source_name"]: item["status"] for item in evaluation["scorecards"]}
     assert all(statuses[name] == "PASS_SEMANTIC_ONLY" for name in names), statuses
+
+
+PROFILE = {"relationships": []}
+ORDERS = "SELECT * FROM main.gold.orders"
+
+
+def test_measure_left_out_by_import_waits_for_a_person_and_skips_genie():
+    evaluation = evaluate_candidate(
+        source_metric_irs=[{"measures": [measure("Sales"), measure("Rank")]}],
+        metric_view={"source": ORDERS, "measures": [{"name": "Sales", "expr": "SUM(sales)"}]},
+        target_profile=PROFILE,
+        query_results={"sales": {"status": "PASS"}},
+        excluded_measures=["rank"],
+    )
+
+    rank = next(item for item in evaluation["scorecards"] if item["source_name"] == "Rank")
+    assert rank["status"] == "EXCLUDED_BY_IMPORT"
+    assert rank["repair_route"] == "HUMAN_DECISION"
+    assert evaluation["needs_genie"] is False
+    assert evaluation["blocking_findings"] == []
+    # The exclusion no longer counts against evidence; only translation coverage shows it.
+    assert evaluation["coverage"]["evidence_coverage"] == 1.0
+    assert evaluation["coverage"]["governed_disposition_coverage"] == 1.0
+    assert evaluation["coverage"]["translation_coverage"] == 0.5
+    assert evaluation["excluded_measures"] == ["rank"]
+
+
+def test_genie_is_not_requested_when_a_mapping_blocker_stops_the_attempt():
+    evaluation = evaluate_candidate(
+        source_metric_irs=[
+            {"measures": [measure("Gross Margin"), measure("Target", dependencies=[{"kind": "external_field"}])]}
+        ],
+        metric_view={"source": ORDERS, "measures": []},
+        target_profile=PROFILE,
+    )
+
+    assert evaluation["readiness"] == "BLOCKED_EVIDENCE"
+    assert evaluation["needs_genie"] is False
+
+
+def test_missing_aggregate_on_a_non_column_expression_goes_to_genie():
+    evaluation = evaluate_candidate(
+        source_metric_irs=[{"measures": [measure("Late Orders", status="NEEDS_AGGREGATION_COMPILATION")]}],
+        metric_view={"source": ORDERS, "measures": [{"name": "Late Orders", "expr": "CASE WHEN late THEN 1 END"}]},
+        target_profile=PROFILE,
+        query_results={"late orders": {"status": "PASS"}},
+    )
+
+    assert evaluation["scorecards"][0]["repair_route"] == "GENIE_PATCH"
+    assert evaluation["needs_genie"] is True
+    assert build_deterministic_patch(evaluation, {"measures": []})["operations"] == []
+
+
+def test_deterministic_patch_never_wraps_unquoted_names_with_spaces():
+    evaluation = {
+        "scorecards": [
+            {"failure_codes": ["AGGREGATION_MISMATCH"], "target": {"name": "Margin", "expr": "profit margin"}},
+            {"failure_codes": ["AGGREGATION_MISMATCH"], "target": {"name": "Cost", "expr": "`unit cost`"}},
+        ]
+    }
+
+    operations = build_deterministic_patch(evaluation, {"measures": []})["operations"]
+
+    assert [item["after"] for item in operations] == ["SUM(`unit cost`)"]
+
+
+def _finding(metric_id, route):
+    return {"metric_id": metric_id, "repair_route": route}
+
+
+def test_retry_stops_when_genie_already_saw_every_remaining_failure():
+    before = {
+        "failure_signature": "a",
+        "blocking_findings": [_finding("A", "DETERMINISTIC_METRIC_PATCH"), _finding("B", "GENIE_PATCH")],
+    }
+    after = {"failure_signature": "b", "blocking_findings": [_finding("B", "GENIE_PATCH")]}
+
+    decision = next_attempt_decision(before, after, genie_ran=True)
+
+    assert decision["retry"] is False
+    assert "Genie already saw" in decision["reason"]
+    assert next_attempt_decision(before, after, genie_ran=False)["retry"] is True
+
+
+def test_retry_stops_when_the_same_failures_remain():
+    findings = [_finding("B", "GENIE_PATCH")]
+    decision = next_attempt_decision(
+        {"failure_signature": "same", "blocking_findings": findings},
+        {"failure_signature": "same", "blocking_findings": findings},
+        genie_ran=False,
+    )
+
+    assert decision["retry"] is False
+
+
+def test_import_exclusions_reads_every_field_name(tmp_path):
+    path = tmp_path / "importbi-result.json"
+    path.write_text(
+        '{"items_not_translated": [{"name": "Rank, Index", "reason": "Table calculation"}, {"name": "Flag", "reason": "UI"}]}',
+        encoding="utf-8",
+    )
+
+    assert import_exclusions(path) == ["Rank", "Index", "Flag"]
+    assert import_exclusions(tmp_path / "missing.json") == []

@@ -12,10 +12,8 @@ relationships:
   maximum_orphan_rate: 0.0
   allow_many_to_many: false
   allow_overlapping_temporal_intervals: false
-repair:
-  maximum_attempts: 3
-  stop_on_repeated_signature: true
-  rollback_on_regression: true
+# Repair limits are not read from this file: the attempt limit is the repair Job's max_attempts
+# parameter, and the stop and rollback rules are in metric_repair.py and deploy_retest_finalize.py.
 retention:
   candidate_days: 7
   staging_days: 7

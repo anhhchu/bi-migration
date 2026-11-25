@@ -4,7 +4,7 @@ from pathlib import Path
 
 import yaml
 
-from datasource_semantic_migration.metric_repair import evaluate_candidate
+from datasource_semantic_migration.metric_repair import evaluate_candidate, import_exclusions, normalized_name
 from datasource_semantic_migration.notebook_results import format_notebook_result, render_volume_links_html
 from datasource_semantic_migration.artifacts import write_json_artifact
 
@@ -41,15 +41,16 @@ for measure in metric_view.get("measures", []):
     query_sql = f"SELECT MEASURE(`{escaped_name}`) FROM {quoted_fqn}"
     try:
         spark.sql(query_sql).limit(1).collect()
-        query_results[name.casefold()] = {"status": "PASS", "sql": query_sql}
+        query_results[normalized_name(name)] = {"status": "PASS", "sql": query_sql}
     except Exception as error:
-        query_results[name.casefold()] = {"status": "FAIL", "sql": query_sql, "error": str(error)[:1000]}
+        query_results[normalized_name(name)] = {"status": "FAIL", "sql": query_sql, "error": str(error)[:1000]}
 
 evaluation = evaluate_candidate(
     source_metric_irs=source_metric_irs,
     metric_view=metric_view,
     target_profile=target_profile,
     query_results=query_results,
+    excluded_measures=import_exclusions(group_internal_path / "importbi-result.json"),
 )
 evaluation.update(
     {
