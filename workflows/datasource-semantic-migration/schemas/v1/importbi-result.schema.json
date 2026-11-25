@@ -36,6 +36,7 @@
     },
     "approximations": {
       "type": "array",
+      "description": "Translated items that differ from the source only in form (boolean as Yes/No, display format, rounding display). Anything that could change results is left out and listed in items_not_translated instead.",
       "items": {
         "type": "object",
         "required": ["name", "detail"],

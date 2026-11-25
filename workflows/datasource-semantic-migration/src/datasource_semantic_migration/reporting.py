@@ -251,8 +251,8 @@ def build_group_review(
             _action(
                 "review_approximations",
                 "REVIEW",
-                "Review translated approximations",
-                "Confirm that each documented approximation preserves the required business behavior.",
+                "Review differences in form",
+                "These measures and fields give the same results as the source but are shown differently, for example Yes/No for a boolean. Confirm each one suits your reports.",
                 [item.get("name", "Unnamed approximation") for item in approximations],
             )
         )

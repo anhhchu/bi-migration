@@ -164,7 +164,7 @@ Use the deterministic target profile:
 Create or replace exactly this candidate Unity Catalog Metric View:
 `{group_manifest['candidate_metric_view_fqn']}`
 
-Do not create or modify dashboards or Genie Agents. Use only the exact physical Databricks tables declared in the mapping. Preserve supported calculations, relationships, filters, aggregations, LOD semantics, parameters, units, formats, comments, display names, and synonyms. Leave unsupported or ambiguous semantics out rather than approximating them.
+Do not create or modify dashboards or Genie Agents. Use only the exact physical Databricks tables declared in the mapping. Preserve supported calculations, relationships, filters, aggregations, LOD semantics, parameters, units, formats, comments, display names, and synonyms. Never approximate business logic: if a translation could change any number or which rows are counted, leave the item out and list it in items_not_translated with the reason. A translation may differ from the source only in form (for example a boolean shown as Yes/No, a display format, or a rounding display); list each such difference in approximations.
 
 Write a JSON result to `{result_path}` with these fields:
 
@@ -174,7 +174,7 @@ Write a JSON result to `{result_path}` with these fields:
 - items_not_translated: list of objects with name and reason for every Tableau field left out.
 - source_tables_used: list of physical tables the Metric View reads.
 - notes: list of strings.
-- Optional: parameters_created (list of names) and approximations (objects with name and detail) for any translated item that is not an exact equivalent.
+- Optional: parameters_created (list of names) and approximations (objects with name and detail) for translated items that differ from the source only in form, never in results.
 
 If no Metric View is saved, write FAILED and fail the task.
 """,

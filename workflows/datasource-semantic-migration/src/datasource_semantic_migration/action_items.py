@@ -315,7 +315,7 @@ def build_action_groups(
         buckets["business_definition"].append(
             _item(
                 str(entry.get("name") or "Approximation"), str(entry.get("detail") or "Translated approximately."),
-                "Confirm the approximation keeps the business meaning, or correct it in metric-view.yaml.",
+                "Translated with a difference in form only (for example Yes/No for a boolean). Confirm reports can show it this way, or correct it in metric-view.yaml.",
                 blocking=False,
             )
         )
