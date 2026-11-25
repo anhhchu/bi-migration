@@ -6,7 +6,7 @@ import yaml
 
 from datasource_semantic_migration.metric_repair import evaluate_candidate
 from datasource_semantic_migration.notebook_results import format_notebook_result, render_volume_links_html
-from datasource_semantic_migration.tableau_parser import write_json_artifact
+from datasource_semantic_migration.artifacts import write_json_artifact
 
 
 for widget_name in ("group_path", "repair_series_id", "attempt", "max_attempts", "job_run_id"):

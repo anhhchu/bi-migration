@@ -4,7 +4,7 @@ import argparse
 import json
 from pathlib import Path
 
-from datasource_semantic_migration.twbx_converter import (
+from datasource_semantic_migration.sources.tableau.twbx_converter import (
     convert_twbx_directory,
     upload_tdsx_files,
 )

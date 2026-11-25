@@ -260,3 +260,82 @@ def test_report_links_the_metric_view_to_catalog_explorer():
     )
     html = render_workflow_html({"workspace_url": "https://w.example", **build_workflow_review(workflow_run_id="1", groups=[review])})
     assert "href='https://w.example/explore/data/main/bi/bim_sales_candidate'" in html
+
+
+def test_group_review_reports_unknown_coverage_for_result_rebuilt_from_catalog():
+    review = build_group_review(
+        group={"group_id": "sales", "group_path": "/Volumes/main/bi/runs/1/groups/sales"},
+        final_result={"status": "PASS_SEMANTIC_ONLY", "metric_view_fqn": "main.bi.bim_sales_candidate"},
+        evaluation={
+            "agent_result": {
+                "status": "RECOVERED_FROM_CATALOG",
+                "dimensions_created": ["Region", "Order Date"],
+                "measures_created": ["Sales"],
+                "items_not_translated": [],
+            },
+            "findings": [],
+        },
+    )
+    assert review["coverage"]["semantic_coverage_percent"] is None
+    assert review["coverage"]["dimensions_created"] == 2
+    assert review["coverage"]["measures_created"] == 1
+    html = render_workflow_html(build_workflow_review(workflow_run_id="1", groups=[review]))
+    assert "None%" not in html
+
+
+def test_group_review_accepts_created_item_counts_instead_of_names():
+    review = build_group_review(
+        group={"group_id": "sales", "group_path": "/Volumes/main/bi/runs/1/groups/sales"},
+        final_result={"status": "PARTIAL", "metric_view_fqn": "main.bi.bim_sales_candidate"},
+        evaluation={
+            "agent_result": {
+                "dimensions_created": 3,
+                "measures_created": 1,
+                "items_not_translated": [{"name": "Profit Ratio", "reason": "Unsupported formula"}],
+            },
+            "findings": [],
+        },
+    )
+    assert review["coverage"]["dimensions_created"] == 3
+    assert review["coverage"]["measure_names"] == []
+    assert review["coverage"]["semantic_coverage_percent"] == 80.0
+
+
+def test_group_review_names_the_source_bi_tool():
+    review = build_group_review(
+        group={"group_id": "sales", "group_path": "/Volumes/main/bi/runs/1/groups/sales", "source_system": "powerbi"},
+        final_result={"status": "PASS_SEMANTIC_ONLY", "metric_view_fqn": "main.bi.bim_sales_candidate"},
+        evaluation={
+            "agent_result": {
+                "dimensions_created": ["Region"],
+                "measures_created": ["Sales"],
+                "items_not_translated": [{"name": "Rank", "reason": "Metric IR marks it unsupported", "kind": "filter"}],
+            },
+            "findings": [],
+        },
+    )
+    assert review["source_system"] == "powerbi"
+    text = str(review)
+    assert "Power BI" in text
+    assert "Tableau" not in text
+    repair = build_repair_review(summary={}, evaluation={"scorecards": []}, source="Power BI")
+    assert "Tableau" not in str(repair)
+
+
+def test_semantic_coverage_counts_each_field_in_a_grouped_entry():
+    review = build_group_review(
+        group={"group_id": "sales", "group_path": "/Volumes/main/bi/runs/1/groups/sales"},
+        final_result={"status": "PARTIAL", "metric_view_fqn": "main.bi.bim_sales_candidate"},
+        evaluation={
+            "agent_result": {
+                "dimensions_created": ["Region"],
+                "measures_created": ["Sales"],
+                "items_not_translated": [{"name": "Profit, Margin, Ratio", "reason": "Unsupported formula"}],
+            },
+            "findings": [],
+        },
+    )
+    assert review["coverage"]["business_items_not_translated"] == 3
+    assert review["coverage"]["semantic_coverage_percent"] == 40.0
+    translation = next(stage for stage in review["gate"]["stages"] if stage["key"] == "translation")
+    assert "3 item(s) not migrated" in translation["summary"]

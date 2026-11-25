@@ -10,9 +10,9 @@ from typing import Any
 
 from lark import Lark, Token
 
-from . import __version__
-from .discovery import sha256_file
-from .tableau_parser import write_json_artifact
+from ... import __version__
+from ...artifacts import sha256_file, write_json_artifact
+from ...source_systems import source_system_of
 
 
 FORMULA_LEXER = Lark(
@@ -412,7 +412,8 @@ def compile_metric_ir(datasource_ir: dict[str, Any]) -> dict[str, Any]:
                 }
             )
         expression = {
-            "kind": "tableau_calculation",
+            "kind": "source_calculation",
+            "language": source_system_of(datasource_ir),
             "formula": calculation.get("formula"),
             "classification": classification,
         }
@@ -471,6 +472,7 @@ def compile_metric_ir(datasource_ir: dict[str, Any]) -> dict[str, Any]:
         "workflow_run_id": datasource_ir["workflow_run_id"],
         "datasource_id": datasource_ir["datasource_id"],
         "datasource_name": datasource_ir["datasource_name"],
+        "source_system": source_system_of(datasource_ir),
         "source_path": datasource_ir["source_path"],
         "document_path": datasource_ir["document_path"],
         "dimensions": dimensions,
@@ -543,44 +545,3 @@ def write_metric_ir_for_datasource_entry(
     return result
 
 
-def consolidate_metric_ir_index(
-    *,
-    datasource_ir_index: dict[str, Any],
-    datasource_ir_index_path: str,
-    metric_ir_root: str | Path,
-) -> dict[str, Any]:
-    entries = []
-    compile_results = []
-    for datasource in datasource_ir_index["datasources"]:
-        result_path = Path(metric_ir_root) / "assets" / datasource["datasource_id"] / "compile-result.json"
-        if not result_path.is_file():
-            raise FileNotFoundError(f"Metric IR compile result does not exist: {result_path}")
-        result = json.loads(result_path.read_text(encoding="utf-8"))
-        entries.append(result)
-        compile_results.append(result_path.as_posix())
-    entries.sort(key=lambda item: (item["datasource_name"] or "").casefold())
-    combined_status_counts: dict[str, int] = defaultdict(int)
-    for entry in entries:
-        for status, count in entry["status_counts"].items():
-            combined_status_counts[status] += count
-    return {
-        "schema_version": "1.0",
-        "workflow_run_id": datasource_ir_index["workflow_run_id"],
-        "created_at": datasource_ir_index["created_at"],
-        "datasource_ir_index_path": datasource_ir_index_path,
-        "metric_ir_root": Path(metric_ir_root).as_posix(),
-        "status": "COMPLETE",
-        "summary": {
-            "datasource_count": len(entries),
-            "dimension_count": sum(item["dimension_count"] for item in entries),
-            "measure_count": sum(item["measure_count"] for item in entries),
-            "parameter_count": sum(item["parameter_count"] for item in entries),
-            "finding_count": sum(item["finding_count"] for item in entries),
-            "status_counts": dict(sorted(combined_status_counts.items())),
-        },
-        "datasources": entries,
-        "compile_results": compile_results,
-        "provenance": {
-            "generator": {"name": "datasource-semantic-migration", "version": __version__}
-        },
-    }

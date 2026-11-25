@@ -3,14 +3,14 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from datasource_semantic_migration.discovery import sha256_file
-from datasource_semantic_migration.metric_compiler import (
+from datasource_semantic_migration.artifacts import sha256_file
+from datasource_semantic_migration.ir_index import consolidate_metric_ir_index
+from datasource_semantic_migration.sources.tableau.metric_compiler import (
     compile_metric_ir,
-    consolidate_metric_ir_index,
     formula_references,
     write_metric_ir_result,
 )
-from datasource_semantic_migration.tableau_parser import parse_tableau_datasource
+from datasource_semantic_migration.sources.tableau.parser import parse_tableau_datasource
 
 
 def _superstore_datasource_ir():

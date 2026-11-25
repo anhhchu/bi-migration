@@ -2,10 +2,14 @@
 import json
 from pathlib import Path
 
-from datasource_semantic_migration.metric_compiler import consolidate_metric_ir_index
+from datasource_semantic_migration.ir_index import consolidate_metric_ir_index
 from datasource_semantic_migration.notebook_results import format_notebook_result, render_volume_links_html
+import yaml
+
 from datasource_semantic_migration.semantic_groups import build_grouping_request
-from datasource_semantic_migration.tableau_parser import consolidate_datasource_ir_index, write_json_artifact
+from datasource_semantic_migration.table_mapping import load_table_mapping
+from datasource_semantic_migration.artifacts import write_json_artifact
+from datasource_semantic_migration.ir_index import consolidate_datasource_ir_index
 
 
 for widget_name in ("manifest_path", "inventory_path"):
@@ -34,9 +38,13 @@ metric_ir_index_path = write_json_artifact(
     metric_ir_index,
     internal_root / "metric-ir" / "metric-ir-index.json",
 )
-if len(inventory["mapping_files"]) != 1:
-    raise ValueError("End-to-end migration requires exactly one table-mapping.yaml")
-mapping_path = inventory["mapping_files"][0]["path"]
+mapping_files = [item["path"] for item in inventory["mapping_files"]]
+if not mapping_files:
+    raise ValueError("No table mapping found. Add a YAML, JSON, or CSV file to the input folder's mappings/ directory.")
+# Merge every mapping file into one normalized document that Genie and later steps read.
+mapping_path = internal_root / "table-mapping.normalized.yaml"
+mapping_path.write_text(yaml.safe_dump(load_table_mapping(mapping_files), sort_keys=False), encoding="utf-8")
+mapping_path = mapping_path.as_posix()
 grouping_result_path = internal_root / "semantic-grouping-proposal.json"
 grouping_request = build_grouping_request(
     inventory=inventory,

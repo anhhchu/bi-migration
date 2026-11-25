@@ -28,3 +28,18 @@ def test_all_workflow_schemas_are_registered_and_loadable():
         definition = registry.get(name)
         assert definition.version == "1.0"
         assert definition.document["$schema"].endswith("2020-12/schema")
+
+
+def test_importbi_result_prompts_name_every_schema_field():
+    root = Path(__file__).resolve().parents[1]
+    schema = SchemaRegistry(root / "schemas").get("importbi_result").document
+    prompts = {
+        "template": (root / "prompts" / "tableau" / "import_metric_view.md").read_text(encoding="utf-8"),
+        "job": (root / "notebooks" / "prepare_candidate_context.py").read_text(encoding="utf-8"),
+    }
+    # validation is reporting-only metadata; the agent is not asked to write it.
+    fields = set(schema["properties"]) - {"validation"}
+    assert set(schema["required"]) <= fields
+    for name, text in prompts.items():
+        missing = sorted(field for field in fields if field not in text)
+        assert not missing, f"{name} prompt does not mention {missing}"

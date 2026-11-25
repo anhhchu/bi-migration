@@ -131,20 +131,11 @@ uv run python deploy.py \
 
 1. Strict bundle validation.
 2. Wheel build and bundle deployment.
-3. Creation or reuse of three Genie Code automations.
+3. Creation or reuse of three Genie Code automations. Each deploy compares the stored automation's prompt with its file in `prompts/`; an unchanged prompt is reused, and an edited prompt gets a new automation.
 4. Replacement of placeholder notebook tasks with native `genie_task` definitions.
 5. Output of all four Job IDs and Genie configuration IDs.
 
 Do not deploy this workflow with `databricks bundle deploy` alone. The bundle intentionally contains inspectable placeholder notebooks; `deploy.py` replaces those placeholders with native Genie Code tasks after deployment.
-
-Use `--recreate-automation` only when a stored Genie Code automation must be replaced:
-
-```bash
-uv run python deploy.py \
-  --profile <profile-name> \
-  --target dev \
-  --recreate-automation
-```
 
 ## Prepare Inputs
 
@@ -156,10 +147,10 @@ Provide one Unity Catalog Volume folder with this contract:
     *.tds
     *.tdsx
   mappings/
-    table-mapping.yaml
+    *.yaml | *.yml | *.json | *.csv
 ```
 
-`table-mapping.csv` and `table-mapping.yml` are also supported. The filename is significant.
+Any file name works, and several mapping files are merged. Each entry needs a Tableau source table and a Databricks target table (`catalog.schema.table`); key and column names are flexible, and `version` is optional. See the App's Mapping guide for examples.
 
 The mapping should identify the physical Databricks tables corresponding to Tableau source tables. Add grain, keys, relationships, temporal predicates, current-record filters, and unit conversions when known. See `datasource-samples/table-mapping.yaml`.
 
@@ -270,6 +261,8 @@ The evaluator checks:
 
 Reports include the numerator, denominator, threshold, gap, and pass/fail result for each gate.
 
+Each group review also shows **semantic coverage**: translated dimensions and measures ÷ (translated dimensions and measures + fields left out that need a person). Fields left out are counted one by one, even when the import lists several in one entry. Technical exclusions (hidden relationship keys, generated UI fields) and items handled automatically (dashboard behaviour, row numbering, visual helpers) are not counted. When the import result was rebuilt from the catalog, which fields were left out is unknown, so coverage shows as "—".
+
 ### Status meanings
 
 - `PASS_SEMANTIC_ONLY` — the target definition is present and no implemented semantic/query failure was recorded. Numerical parity is not proven.
@@ -334,6 +327,12 @@ Start with the HTML files under `reports/`. Detailed IR, SQL, patches, failure c
 uv sync
 uv run pytest
 ```
+
+Code layout:
+
+- `src/datasource_semantic_migration/sources/<source>/` — one folder per BI tool (today `tableau/`). It finds the input files and turns them into the Datasource IR and Metric IR (`schemas/v1/`), recording `source_system`.
+- `src/datasource_semantic_migration/` (everything else) — shared by every source: grouping, table mapping, evaluation, repair, gates, and reports. Report wording names the source from the group's `source_system`.
+- `prompts/<source>/` holds source-specific Genie Code prompts; `prompts/shared/` holds prompts that only see Metric View YAML.
 
 Key references:
 

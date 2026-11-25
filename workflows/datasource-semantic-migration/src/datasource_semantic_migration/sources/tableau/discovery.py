@@ -10,11 +10,13 @@ from pathlib import Path, PurePosixPath
 from typing import Any, BinaryIO
 from xml.etree import ElementTree
 
-from . import __version__
+from ... import __version__
+from ...artifacts import sha256_file
 
 
 SUPPORTED_DATASOURCE_SUFFIXES = {".tds", ".tdsx"}
-SUPPORTED_MAPPING_NAMES = {"table-mapping.csv", "table-mapping.yaml", "table-mapping.yml"}
+# Any YAML, JSON, or CSV file in mappings/ is read as table mapping; several files are merged.
+SUPPORTED_MAPPING_SUFFIXES = {".yaml", ".yml", ".json", ".csv"}
 EMBEDDED_EXTRACT_SUFFIXES = {".hyper", ".tde"}
 
 
@@ -28,14 +30,6 @@ class DiscoveryLimits:
     maximum_member_bytes: int = 512 * 1024 * 1024
     maximum_uncompressed_bytes: int = 2 * 1024 * 1024 * 1024
     maximum_tds_bytes: int = 128 * 1024 * 1024
-
-
-def sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def _utc_timestamp() -> str:
@@ -186,7 +180,8 @@ def inspect_tds(path: Path, *, limits: DiscoveryLimits | None = None) -> dict[st
         "byte_size": byte_size,
         "sha256": sha256_file(path),
         "datasource_name": display_name,
-        "tableau_version": root.attrib.get("version"),
+        "source_system": "tableau",
+        "source_version": root.attrib.get("version"),
         "connection_classes": connection_classes,
         "relation_count": relation_count,
         "calculation_count": calculation_count,
@@ -213,7 +208,12 @@ def _mapping_inventory(mappings_path: Path) -> list[dict[str, Any]]:
         raise NotADirectoryError(f"Mappings path is not a directory: {mappings_path}")
     mappings = []
     for path in sorted(mappings_path.iterdir(), key=lambda item: item.name.casefold()):
-        if path.is_symlink() or not path.is_file() or path.name.casefold() not in SUPPORTED_MAPPING_NAMES:
+        if (
+            path.is_symlink()
+            or not path.is_file()
+            or path.name.startswith(".")
+            or path.suffix.casefold() not in SUPPORTED_MAPPING_SUFFIXES
+        ):
             continue
         mappings.append(
             {

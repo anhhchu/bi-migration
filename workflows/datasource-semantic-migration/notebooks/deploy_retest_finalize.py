@@ -20,7 +20,8 @@ from datasource_semantic_migration.reporting import (
     render_repair_html,
     render_workflow_html,
 )
-from datasource_semantic_migration.tableau_parser import write_json_artifact
+from datasource_semantic_migration.source_systems import source_label, source_system_of
+from datasource_semantic_migration.artifacts import write_json_artifact
 
 # Used for Catalog Explorer links in the HTML reports.
 WORKSPACE_URL = "https://" + spark.conf.get("spark.databricks.workspaceUrl").removeprefix("https://").rstrip("/")
@@ -223,6 +224,7 @@ report_path = Path(manifest.get("report_path") or run_root / "reports" / "groups
 group_info = {
     "group_id": manifest["group_id"],
     "display_name": manifest.get("display_name") or manifest.get("group_name"),
+    "source_system": source_system_of(manifest),
     "group_path": str(group_path),
     "internal_path": str(group_internal_path),
     "report_path": str(report_path),
@@ -243,7 +245,7 @@ write_json_artifact(group_review, report_path / "migration-review.json")
     render_workflow_html({"workspace_url": WORKSPACE_URL, **build_workflow_review(workflow_run_id=manifest["workflow_run_id"], groups=[group_review])}),
     encoding="utf-8",
 )
-repair_review = build_repair_review(summary=summary, evaluation=evaluation)
+repair_review = build_repair_review(summary=summary, evaluation=evaluation, source=source_label(manifest))
 write_json_artifact(repair_review, report_path / "repair-review.json")
 (report_path / "repair-review.html").write_text(render_repair_html(repair_review), encoding="utf-8")
 

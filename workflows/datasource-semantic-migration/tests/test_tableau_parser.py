@@ -4,12 +4,10 @@ import json
 import shutil
 from pathlib import Path
 
-from datasource_semantic_migration.discovery import discover_inputs, sha256_file
-from datasource_semantic_migration.tableau_parser import (
-    consolidate_datasource_ir_index,
-    parse_tableau_datasource,
-    write_asset_ir_result,
-)
+from datasource_semantic_migration.artifacts import sha256_file
+from datasource_semantic_migration.sources.tableau.discovery import discover_inputs
+from datasource_semantic_migration.ir_index import consolidate_datasource_ir_index
+from datasource_semantic_migration.sources.tableau.parser import parse_tableau_datasource, write_asset_ir_result
 
 
 def _root() -> Path:
@@ -34,6 +32,8 @@ def test_superstore_parser_preserves_datasource_semantics():
     ir = _parse(_root() / "datasource-samples" / "Superstore.tds")
 
     assert ir["datasource_name"] == "Sample - Superstore"
+    assert ir["source_system"] == "tableau"
+    assert ir["source_version"]
     assert len(ir["connections"]) == 2
     assert [relation["name"] for relation in ir["relations"]] == ["Orders", "People", "Returns"]
     assert len(ir["relationships"]) == 2

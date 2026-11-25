@@ -8,8 +8,11 @@ from typing import Any
 
 import yaml
 
+from .table_mapping import load_table_mapping  # noqa: F401  (re-exported)
+
 from . import __version__
-from .tableau_parser import write_json_artifact
+from .source_systems import source_system_of
+from .artifacts import write_json_artifact
 
 
 FEATURE_WEIGHTS = {
@@ -43,18 +46,6 @@ def _relation_name(value: str | None) -> str:
 def _slug(value: str, maximum_length: int = 36) -> str:
     slug = re.sub(r"[^a-z0-9]+", "-", value.casefold()).strip("-")
     return slug[:maximum_length].rstrip("-") or "semantic-group"
-
-
-def load_table_mapping(path: str | Path) -> dict[str, Any]:
-    mapping_path = Path(path)
-    if not mapping_path.is_file():
-        raise FileNotFoundError(f"Table mapping does not exist: {mapping_path}")
-    if mapping_path.suffix.casefold() not in {".yaml", ".yml"}:
-        raise ValueError("End-to-end migration currently requires a YAML table mapping")
-    document = yaml.safe_load(mapping_path.read_text(encoding="utf-8")) or {}
-    if document.get("version") != "1.0" or not document.get("table_mappings"):
-        raise ValueError("Table mapping must contain version '1.0' and at least one table_mappings entry")
-    return document
 
 
 def semantic_features(datasource_ir: dict[str, Any], metric_ir: dict[str, Any]) -> dict[str, set[str]]:
@@ -133,6 +124,7 @@ def _semantic_assets(
             {
                 "datasource_id": datasource_id,
                 "datasource_name": datasource_ir["datasource_name"],
+                "source_system": source_system_of(datasource_ir),
                 "source_path": datasource_ir["source_path"],
                 "document_path": datasource_ir["document_path"],
                 "datasource_ir_path": datasource_entry["output_path"],
@@ -299,6 +291,9 @@ def _validate_grouping_proposal(
                     f"Datasource {datasource_id} appears in both {seen[datasource_id]} and {display_name}"
                 )
             seen[datasource_id] = display_name
+        source_systems = sorted({assets[datasource_id]["source_system"] for datasource_id in [*member_ids, *helper_ids]})
+        if len(source_systems) > 1:
+            raise ValueError(f"Grouping proposal group {display_name} mixes BI tools: {source_systems}")
         target_schema_sets = [set(assets[datasource_id]["target_schemas"]) for datasource_id in member_ids]
         if len(target_schema_sets) > 1 and not set.intersection(*target_schema_sets):
             raise ValueError(f"Grouping proposal group {display_name} combines incompatible target schemas")
@@ -364,6 +359,7 @@ def build_semantic_groups(
         primary_assets = [assets_by_id[datasource_id] for datasource_id in proposed_group["member_datasource_ids"]]
         helper_assets = [assets_by_id[datasource_id] for datasource_id in proposed_group["helper_datasource_ids"]]
         assets = [*primary_assets, *helper_assets]
+        source_system = primary_assets[0]["source_system"]
         fingerprint_basis = {
             "datasource_ids": sorted(asset["datasource_id"] for asset in primary_assets),
             "target_tables": sorted({target for asset in primary_assets for target in asset["target_tables"]}),
@@ -404,6 +400,7 @@ def build_semantic_groups(
             "workflow_run_id": inventory["workflow_run_id"],
             "group_id": group_slug,
             "display_name": proposed_group["display_name"],
+            "source_system": source_system,
             "domain": proposed_group["domain"],
             "grouping_confidence": proposed_group["confidence"],
             "grouping_rationale": proposed_group["rationale"],
@@ -434,6 +431,7 @@ def build_semantic_groups(
             "grouping_confidence": proposed_group["confidence"],
             "grouping_rationale": proposed_group["rationale"],
             "semantic_hash": semantic_hash,
+            "source_system": source_system,
             "datasource_count": len(primary_assets),
             "supporting_datasource_count": len(helper_assets),
             "datasources": [
@@ -464,6 +462,7 @@ def build_semantic_groups(
             {
                 "group_id": group_slug,
                 "display_name": proposed_group["display_name"],
+                "source_system": source_system,
                 "group_path": group_path.as_posix(),
                 "internal_path": group_internal_path.as_posix(),
                 "report_path": group_report_path.as_posix(),

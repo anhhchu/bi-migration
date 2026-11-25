@@ -4,8 +4,15 @@ from html import escape
 import re
 from typing import Any
 
-from .action_items import build_action_groups, entry_names, plain_language, reconcile_import_exclusions
+from .action_items import (
+    build_action_groups,
+    entry_field_count,
+    entry_names,
+    plain_language,
+    reconcile_import_exclusions,
+)
 from .gate import build_gate
+from .source_systems import fill_source, source_label, source_system_of
 from .report_html import render_workflow_html  # noqa: F401  (re-exported for notebooks)
 from .proposal_handoff import build_handoff
 
@@ -120,6 +127,16 @@ def _is_technical_untranslated(item: dict[str, Any]) -> bool:
     return "hidden relationship key" in reason or "generated ui field" in reason
 
 
+def _created_items(value: Any) -> tuple[int, list[str]]:
+    """Count and names for a created-items field; the import may record a list of names or only a count."""
+    if isinstance(value, bool):
+        return 0, []
+    if isinstance(value, int):
+        return value, []
+    names = [str(name) for name in value or []]
+    return len(names), names
+
+
 def _action(action_id: str, priority: str, title: str, description: str, items: list[str]) -> dict[str, Any]:
     return {
         "action_id": action_id,
@@ -139,15 +156,18 @@ def build_group_review(
     scorecard_evaluation: dict[str, Any] | None = None,
     group_mapping: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    source = source_label(group)
     agent_result = evaluation.get("agent_result") or {}
     measure_expressions = {
         str(item.get("name")): str(item.get("expr", "")).strip()
         for item in (metric_view or {}).get("measures", [])
         if item.get("name")
     }
-    dimensions = agent_result.get("dimensions_created", [])
-    measures = agent_result.get("measures_created", [])
-    parameters = agent_result.get("parameters_created", [])
+    dimension_count, dimensions = _created_items(agent_result.get("dimensions_created"))
+    measure_count, measures = _created_items(agent_result.get("measures_created"))
+    parameter_count, parameters = _created_items(agent_result.get("parameters_created"))
+    # A result rebuilt from the catalog cannot know which source fields were left out.
+    untranslated_known = agent_result.get("status") != "RECOVERED_FROM_CATALOG"
     untranslated = agent_result.get("items_not_translated", [])
     business_untranslated = [item for item in untranslated if not _is_technical_untranslated(item)]
     technical_exclusions = [item for item in untranslated if _is_technical_untranslated(item)]
@@ -156,9 +176,7 @@ def build_group_review(
     blocking_findings = [item for item in findings if item.get("severity") == "ERROR"]
     warning_findings = [item for item in findings if item.get("severity") == "WARNING"]
     repair = evaluation.get("repair") or {}
-    translated_count = len(dimensions) + len(measures)
-    semantic_item_count = translated_count + len(business_untranslated)
-    coverage_percent = round(100 * translated_count / semantic_item_count, 1) if semantic_item_count else 0.0
+    translated_count = dimension_count + measure_count
 
     actions = []
     external_fields = sorted(
@@ -204,7 +222,7 @@ def build_group_review(
     aggregation_items = [
         name for name in aggregation_items if "MEASURE(" not in measure_expressions.get(name, "").upper()
     ]
-    # SUM is Tableau's default for numeric measures, so only other aggregations need a person.
+    # SUM is the BI tools' default for numeric fields, so only other aggregations need a person.
     aggregations_needing_review = [
         name for name in aggregation_items if not re.match(r"^\s*SUM\s*\(", measure_expressions.get(name, ""), re.IGNORECASE)
     ]
@@ -213,7 +231,7 @@ def build_group_review(
             "confirm_aggregations",
             "REVIEW",
             "Check how these measures are totalled",
-            "In Tableau these formulas are calculated per row, and each worksheet decides how to total them. "
+            f"In {source} these formulas are calculated per row, and each report decides how to total them. "
             "A Metric View must fix one way to total each measure, so the workflow chose one (shown below). "
             "If a choice matches how your reports total the field, no action is needed.",
             aggregations_needing_review,
@@ -252,11 +270,16 @@ def build_group_review(
         group_mapping=group_mapping,
         repair=repair,
         has_candidate=bool(final_result.get("metric_view_fqn")),
+        source=source,
     )
     # Dashboard-only items are not part of the model, so they do not lower semantic coverage.
     human_untranslated = action_groups.pop("_needs_people")
-    semantic_item_count = translated_count + len(human_untranslated)
-    coverage_percent = round(100 * translated_count / semantic_item_count, 1) if semantic_item_count else 0.0
+    # Count fields, not entries: one entry such as "Profit, Margin" leaves out two fields.
+    untranslated_field_count = entry_field_count(human_untranslated)
+    semantic_item_count = translated_count + untranslated_field_count
+    coverage_percent = (
+        round(100 * translated_count / semantic_item_count, 1) if semantic_item_count else 0.0
+    ) if untranslated_known else None
     gate = build_gate(
         has_candidate=bool(final_result.get("metric_view_fqn")),
         repair=repair,
@@ -270,6 +293,7 @@ def build_group_review(
             # Business decisions are reported under Translation; Design covers expressions, data, and access.
             if action_group["category"] in {"calculation", "access_platform", "data_mapping"}
         ],
+        source=source,
     )
     readiness = {"BLOCKED": "BLOCKED", "NEEDS_REVIEW": "NEEDS_REVIEW", "CHECKS_PENDING": "NEEDS_REVIEW"}.get(
         gate["status"], "READY"
@@ -281,6 +305,7 @@ def build_group_review(
     return {
         "group_id": group["group_id"],
         "display_name": group.get("display_name"),
+        "source_system": source_system_of(group),
         "status": final_result["status"],
         "readiness": readiness,
         "headline": headline,
@@ -291,10 +316,10 @@ def build_group_review(
         },
         "coverage": {
             "semantic_coverage_percent": coverage_percent,
-            "dimensions_created": len(dimensions),
-            "measures_created": len(measures),
-            "parameters_created": len(parameters),
-            "business_items_not_translated": len(human_untranslated),
+            "dimensions_created": dimension_count,
+            "measures_created": measure_count,
+            "parameters_created": parameter_count,
+            "business_items_not_translated": untranslated_field_count,
             "technical_items_excluded": len(technical_exclusions),
             "dimension_names": dimensions,
             "measure_names": measures,
@@ -369,10 +394,10 @@ def build_workflow_review(*, workflow_run_id: str, groups: list[dict[str, Any]])
 METRIC_STATUS_GUIDE = {
     "PASS_SEMANTIC_ONLY": {
         "meaning": "The target measure exists and passed structural semantic checks.",
-        "limitation": "This does not prove numeric parity with Tableau source data.",
+        "limitation": "This does not prove numeric parity with {source} source data.",
     },
     "FAILED_SEMANTICS": {
-        "meaning": "The target measure is missing or its definition conflicts with known Tableau semantics.",
+        "meaning": "The target measure is missing or its definition conflicts with known {source} semantics.",
         "limitation": "No claim about numeric values is made because the definition is not yet valid.",
     },
     "FAILED_SEMANTIC": {
@@ -384,7 +409,7 @@ METRIC_STATUS_GUIDE = {
         "limitation": "Inspect the recorded SQL and engine error; this is not necessarily a numeric mismatch.",
     },
     "BLOCKED_UNRESOLVED_MAPPING": {
-        "meaning": "The Tableau calculation depends on a datasource or field absent from the approved mapping.",
+        "meaning": "The {source} calculation depends on a datasource or field absent from the approved mapping.",
         "limitation": "Automatic repair cannot invent an approved target.",
     },
     "EXCLUDED_UNSUPPORTED": {
@@ -395,7 +420,7 @@ METRIC_STATUS_GUIDE = {
 
 FAILURE_CODE_GUIDE = {
     "MISSING_TARGET_MEASURE": {
-        "meaning": "This Tableau measure has no matching measure in the Metric View.",
+        "meaning": "This {source} measure has no matching measure in the Metric View.",
         "action": (
             "Automatic repair asks Genie to add it. If it is still missing, add the measure to "
             "groups/<group>/metric-view.yaml and run the Datasource semantic repair Job, or accept it as not migrated."
@@ -410,7 +435,7 @@ FAILURE_CODE_GUIDE = {
     },
     "AGGREGATION_MISMATCH": {
         "meaning": (
-            "Tableau calculates this formula per row, so the Metric View must say how to total it "
+            "{source} calculates this formula per row, so the Metric View must say how to total it "
             "(SUM, AVG, COUNT, or built from other measures with MEASURE()). The generated expression does neither."
         ),
         "action": (
@@ -427,12 +452,12 @@ FAILURE_CODE_GUIDE = {
         ),
     },
     "EXTERNAL_DATASOURCE_UNMAPPED": {
-        "meaning": "The calculation uses a field from another Tableau datasource that table-mapping.yaml does not map.",
+        "meaning": "The calculation uses a field from another {source} datasource that table-mapping.yaml does not map.",
         "action": "Add that datasource's tables to table-mapping.yaml, then run Propose semantic groups again.",
     },
     "UNSUPPORTED_METRIC_SHAPE": {
         "meaning": (
-            "The calculation uses a Tableau feature with no Metric View equivalent, such as a table calculation "
+            "The calculation uses a {source} feature with no Metric View equivalent, such as a table calculation "
             "(INDEX, RUNNING_SUM) that depends on the worksheet layout."
         ),
         "action": "No fix in the Metric View. Rebuild it in the dashboard or a SQL view, or accept it as not migrated.",
@@ -459,7 +484,7 @@ COVERAGE_GATE_GUIDE = {
         "numerator": "evidenced_metric_count",
         "denominator": "source_business_metric_count",
         "threshold": "retained_metric_evidence_coverage",
-        "definition": "Source metrics with retained passing evidence. Semantic-only evidence proves structure, not Tableau numeric parity.",
+        "definition": "Source metrics with retained passing evidence. Semantic-only evidence proves structure, not {source} numeric parity.",
     },
     "measure_queryability": {
         "label": "Measure Queryability",
@@ -475,9 +500,10 @@ def _coverage_gate_details(
     before: dict[str, Any],
     after: dict[str, Any],
     policy: dict[str, Any],
+    source: str,
 ) -> list[dict[str, Any]]:
     details = []
-    for metric_name, guide in COVERAGE_GATE_GUIDE.items():
+    for metric_name, guide in fill_source(COVERAGE_GATE_GUIDE, source).items():
         numerator_key = guide["numerator"]
         denominator_key = guide["denominator"]
         numerator = int(after.get(numerator_key, 0))
@@ -504,14 +530,14 @@ def _coverage_gate_details(
     return details
 
 
-def _scorecard_explanation(scorecard: dict[str, Any]) -> dict[str, Any]:
+def _scorecard_explanation(scorecard: dict[str, Any], source: str) -> dict[str, Any]:
     status = str(scorecard.get("status", "UNKNOWN"))
-    status_help = METRIC_STATUS_GUIDE.get(
+    status_help = fill_source(METRIC_STATUS_GUIDE, source).get(
         status,
         {"meaning": "No plain-language definition is registered for this status.", "limitation": "Review the raw scorecard."},
     )
     failure_details = [
-        {"code": code, **FAILURE_CODE_GUIDE.get(code, {"meaning": "Unknown failure code.", "action": "Review manually."})}
+        {"code": code, **fill_source(FAILURE_CODE_GUIDE, source).get(code, {"meaning": "Unknown failure code.", "action": "Review manually."})}
         for code in scorecard.get("failure_codes", [])
     ]
     query = scorecard.get("query") or {"status": scorecard.get("queryability", "NOT_RUN")}
@@ -536,14 +562,15 @@ def _scorecard_explanation(scorecard: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def build_repair_review(*, summary: dict[str, Any], evaluation: dict[str, Any]) -> dict[str, Any]:
+def build_repair_review(*, summary: dict[str, Any], evaluation: dict[str, Any], source: str = "Tableau") -> dict[str, Any]:
+    """source is the display name of the BI tool the Metric View was migrated from."""
     before = summary.get("coverage_before", {})
     after = summary.get("coverage_after", {})
     policy = summary.get("policy") or evaluation.get("policy") or {}
-    scorecards = [_scorecard_explanation(item) for item in evaluation.get("scorecards", [])]
-    gates = _coverage_gate_details(before, after, policy)
+    scorecards = [_scorecard_explanation(item, source) for item in evaluation.get("scorecards", [])]
+    gates = _coverage_gate_details(before, after, policy, source)
     failed_gates = [item for item in gates if not item["passed"]]
-    blocking_findings = [_scorecard_explanation(item) for item in evaluation.get("blocking_findings", [])]
+    blocking_findings = [_scorecard_explanation(item, source) for item in evaluation.get("blocking_findings", [])]
     not_run = [item for item in scorecards if item["query_detail"]["status"] == "NOT_RUN"]
     not_applicable = [item for item in scorecards if item["query_detail"]["status"] == "NOT_APPLICABLE"]
     query_failed = [item for item in scorecards if item["query_detail"]["status"] == "FAIL"]
@@ -604,8 +631,8 @@ def build_repair_review(*, summary: dict[str, Any], evaluation: dict[str, Any]) 
             "not_run_metrics": [item["source_name"] for item in not_run],
             "not_applicable_metrics": [item["source_name"] for item in not_applicable],
         },
-        "status_guide": METRIC_STATUS_GUIDE,
-        "failure_code_guide": FAILURE_CODE_GUIDE,
+        "status_guide": fill_source(METRIC_STATUS_GUIDE, source),
+        "failure_code_guide": fill_source(FAILURE_CODE_GUIDE, source),
         "attempt_dir": summary.get("attempt_dir"),
         "artifacts": {
             "query_results_before": f"{summary.get('attempt_dir')}/query-results-before.json",

@@ -3,9 +3,9 @@ import json
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from datasource_semantic_migration.metric_compiler import write_metric_ir_for_datasource_entry
+from datasource_semantic_migration.sources.tableau.metric_compiler import write_metric_ir_for_datasource_entry
 from datasource_semantic_migration.notebook_results import format_notebook_result, render_volume_links_html
-from datasource_semantic_migration.tableau_parser import write_asset_ir_result
+from datasource_semantic_migration.sources.tableau.parser import write_asset_ir_result
 
 
 for widget_name in ("inventory_path", "asset_indexes", "analysis_batch_workers"):

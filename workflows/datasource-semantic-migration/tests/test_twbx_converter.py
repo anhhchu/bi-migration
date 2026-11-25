@@ -5,8 +5,8 @@ from pathlib import Path
 
 import pytest
 
-from datasource_semantic_migration.discovery import UnsafeArchiveError
-from datasource_semantic_migration.twbx_converter import (
+from datasource_semantic_migration.sources.tableau.discovery import UnsafeArchiveError
+from datasource_semantic_migration.sources.tableau.twbx_converter import (
     convert_twbx,
     convert_twbx_directory,
     upload_tdsx_files,
@@ -108,7 +108,7 @@ def test_upload_uses_workflow_datasources_directory(tmp_path, monkeypatch):
         commands.append(arguments)
 
     monkeypatch.setattr(
-        "datasource_semantic_migration.twbx_converter._run_databricks_cli",
+        "datasource_semantic_migration.sources.tableau.twbx_converter._run_databricks_cli",
         record_command,
     )
 

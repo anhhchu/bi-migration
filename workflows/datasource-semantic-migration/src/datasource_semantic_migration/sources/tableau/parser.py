@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import hashlib
-import json
 from pathlib import Path
 from typing import Any
 from xml.etree import ElementTree
 
-from . import __version__
-from .discovery import DiscoveryLimits, sha256_file
+from ... import __version__
+from ...artifacts import sha256_file, write_json_artifact
+from .discovery import DiscoveryLimits
 
 
 SENSITIVE_ATTRIBUTE_PARTS = ("password", "secret", "token", "credential")
@@ -531,7 +531,8 @@ def parse_tableau_datasource(
         "workflow_run_id": workflow_run_id,
         "datasource_id": datasource_id,
         "datasource_name": _datasource_display_name(root, path),
-        "tableau_version": root.attrib.get("version"),
+        "source_system": "tableau",
+        "source_version": root.attrib.get("version"),
         "source_path": source_path,
         "document_path": document_path,
         "package_hash": package_hash,
@@ -599,15 +600,6 @@ def parse_inventory_asset(inventory: dict[str, Any], asset_index: int) -> list[d
     return parsed
 
 
-def write_json_artifact(document: dict[str, Any], destination: str | Path) -> Path:
-    output_path = Path(destination)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    temporary_path = output_path.with_suffix(f"{output_path.suffix}.tmp")
-    temporary_path.write_text(json.dumps(document, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    temporary_path.replace(output_path)
-    return output_path
-
-
 def write_asset_ir_result(
     *,
     inventory: dict[str, Any],
@@ -649,57 +641,3 @@ def write_asset_ir_result(
     return result
 
 
-def consolidate_datasource_ir_index(
-    *,
-    inventory: dict[str, Any],
-    inventory_path: str,
-    ir_root: str | Path,
-) -> dict[str, Any]:
-    datasource_entries = []
-    parse_results = []
-    for asset in inventory["assets"]:
-        if asset["duplicate_of"] is not None:
-            continue
-        result_path = Path(ir_root) / "assets" / asset["asset_id"] / "parse-result.json"
-        if not result_path.is_file():
-            raise FileNotFoundError(f"Datasource parse result does not exist: {result_path}")
-        result = json.loads(result_path.read_text(encoding="utf-8"))
-        parse_results.append(result_path.as_posix())
-        datasource_entries.extend(result["datasources"])
-    datasource_entries.sort(key=lambda item: (item["source_path"].casefold(), item["document_path"].casefold()))
-    duplicates = [
-        {
-            "source_path": asset["source_path"],
-            "relative_path": asset["relative_path"],
-            "duplicate_of": asset["duplicate_of"],
-        }
-        for asset in inventory["assets"]
-        if asset["duplicate_of"] is not None
-    ]
-    return {
-        "schema_version": "1.0",
-        "workflow_run_id": inventory["workflow_run_id"],
-        "created_at": inventory["created_at"],
-        "inventory_path": inventory_path,
-        "inventory_hash": inventory["inventory_hash"],
-        "ir_root": Path(ir_root).as_posix(),
-        "status": "COMPLETE",
-        "summary": {
-            "package_count": inventory["summary"]["unique_count"],
-            "datasource_count": len(datasource_entries),
-            "duplicate_count": inventory["summary"]["duplicate_count"],
-            "connection_count": sum(item["connection_count"] for item in datasource_entries),
-            "relation_count": sum(item["relation_count"] for item in datasource_entries),
-            "relationship_count": sum(item["relationship_count"] for item in datasource_entries),
-            "field_count": sum(item["field_count"] for item in datasource_entries),
-            "calculation_count": sum(item["calculation_count"] for item in datasource_entries),
-            "parameter_count": sum(item["parameter_count"] for item in datasource_entries),
-            "warning_count": sum(item["warning_count"] for item in datasource_entries),
-        },
-        "datasources": datasource_entries,
-        "duplicates": duplicates,
-        "parse_results": parse_results,
-        "provenance": {
-            "generator": {"name": "datasource-semantic-migration", "version": __version__}
-        },
-    }

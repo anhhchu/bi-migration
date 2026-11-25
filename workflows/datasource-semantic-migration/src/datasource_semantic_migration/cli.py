@@ -4,7 +4,7 @@ import argparse
 import json
 
 from .config import load_workflow_config
-from .discovery import discover_inputs, write_inventory
+from .sources.tableau.discovery import discover_inputs, write_inventory
 from .input_contract import InputContract
 from .manifest import build_workflow_manifest
 from .schema_registry import SchemaRegistry

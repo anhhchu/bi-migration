@@ -11,6 +11,8 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from .action_items import entry_field_count, entry_names
+
 PASS, WARN, FAIL, NOT_RUN = "PASS", "WARN", "FAIL", "NOT_RUN"
 
 # Division by another expression is a ratio; division by a numeric constant only rescales the value.
@@ -57,7 +59,9 @@ def _stage(key: str, label: str, status: str, summary: str, next_step: str | Non
     return {"key": key, "label": label, "status": status, "summary": summary, "next_step": next_step, **extra}
 
 
-def _translation_stage(*, has_candidate: bool, coverage: dict[str, Any], untranslated: list[dict[str, Any]]) -> dict[str, Any]:
+def _translation_stage(
+    *, has_candidate: bool, coverage: dict[str, Any], untranslated: list[dict[str, Any]], source: str
+) -> dict[str, Any]:
     if not has_candidate:
         return _stage(
             "translation", "Translation", FAIL, "No candidate Metric View was created.",
@@ -65,14 +69,15 @@ def _translation_stage(*, has_candidate: bool, coverage: dict[str, Any], untrans
         )
     translated = coverage.get("translated_metric_count")
     total = coverage.get("source_business_metric_count")
-    ratio = f"{translated} of {total} Tableau measures translated" if total else "Translation coverage not recorded"
+    ratio = f"{translated} of {total} {source} measures translated" if total else "Translation coverage not recorded"
     if untranslated:
-        names = ", ".join(_short(str(item.get("name", "unnamed"))) for item in untranslated[:3])
-        if len(untranslated) > 3:
+        all_names = [name for item in untranslated for name in (entry_names(item) or ["unnamed"])]
+        names = ", ".join(_short(name) for name in all_names[:3])
+        if len(all_names) > 3:
             names += ", …"
         return _stage(
             "translation", "Translation", WARN,
-            f"{ratio}; {len(untranslated)} item(s) not migrated, each with a stated reason ({names}).",
+            f"{ratio}; {entry_field_count(untranslated)} item(s) not migrated, each with a stated reason ({names}).",
             "Confirm each item is acceptable to leave out, or rebuild it in the dashboard or SQL.",
         )
     return _stage("translation", "Translation", PASS, f"{ratio}; nothing left out.")
@@ -157,16 +162,18 @@ def build_gate(
     group_mapping: dict[str, Any] | None,
     untranslated: list[dict[str, Any]],
     review_actions: list[dict[str, Any]],
+    source: str = "Tableau",
 ) -> dict[str, Any]:
+    """source is the display name of the BI tool the Metric View was migrated from."""
     coverage = repair.get("coverage_after") or {}
     stages = [
-        _translation_stage(has_candidate=has_candidate, coverage=coverage, untranslated=untranslated),
+        _translation_stage(has_candidate=has_candidate, coverage=coverage, untranslated=untranslated, source=source),
         _contract_stage(metric_view=metric_view, group_mapping=group_mapping),
         _design_stage(scorecard_evaluation=scorecard_evaluation, repair=repair, review_actions=review_actions),
         _stage(
             "parity", "Parity", NOT_RUN,
-            "Numbers have not been compared with Tableau. No trusted reference values were provided.",
-            "Provide expected values from trusted Tableau reports to compare against.",
+            f"Numbers have not been compared with {source}. No trusted reference values were provided.",
+            f"Provide expected values from trusted {source} reports to compare against.",
         ),
         _stage(
             "performance", "Performance", NOT_RUN, "Query speed has not been measured.",
@@ -188,7 +195,7 @@ def build_gate(
         status, headline, next_stage = "NEEDS_REVIEW", f"Needs review at {first_warn['label']}.", first_warn
     else:
         status = "READY_FOR_PARITY"
-        headline = "Translation, contract, and design checks pass. Next: compare numbers with Tableau."
+        headline = f"Translation, contract, and design checks pass. Next: compare numbers with {source}."
         next_stage = next(stage for stage in stages if stage["key"] == "parity")
     return {
         "schema_version": "1.0",

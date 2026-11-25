@@ -6,7 +6,7 @@ from pathlib import Path
 import yaml
 
 from datasource_semantic_migration.notebook_results import format_notebook_result, render_volume_links_html
-from datasource_semantic_migration.tableau_parser import write_json_artifact
+from datasource_semantic_migration.artifacts import write_json_artifact
 
 
 for widget_name in ("group_manifest_path", "target_profile_path", "importbi_result_path", "warehouse_id"):
@@ -75,8 +75,8 @@ if definition:
         agent_result = {
             "metric_view_fqn": candidate_fqn,
             "status": "RECOVERED_FROM_CATALOG",
-            "dimensions_created": len(dimensions),
-            "measures_created": len(measures),
+            "dimensions_created": [str(item["name"]) for item in dimensions if item.get("name")],
+            "measures_created": [str(item["name"]) for item in measures if item.get("name")],
             "items_not_translated": [],
             "source_tables_used": allowed_lineage,
             "notes": ["The Genie task did not write its result artifact; reconciliation rebuilt it from Unity Catalog."],

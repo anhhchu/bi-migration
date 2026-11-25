@@ -11,6 +11,7 @@ from html import escape
 from typing import Any
 
 from .action_items import plain_language
+from .source_systems import source_label
 
 STATUS_STYLE = {
     "BLOCKED": ("Blocked", "danger"),
@@ -205,12 +206,13 @@ def _group_html(group: dict[str, Any], workspace_url: str | None = None) -> str:
             + (f"<p>Next step: {escape(gate['next_step'])}</p>" if gate.get("next_step") else "")
             + "</div>"
         )
+    coverage_percent = coverage.get("semantic_coverage_percent")
     kpis = "".join(
         f"<div class='kpi'><span>{escape(name)}</span><strong>{escape(str(value))}</strong></div>"
         for name, value in (
             ("Dimensions", coverage.get("dimensions_created", "—")),
             ("Measures", coverage.get("measures_created", "—")),
-            ("Semantic coverage", f"{coverage.get('semantic_coverage_percent', '—')}%"),
+            ("Semantic coverage", "—" if coverage_percent is None else f"{coverage_percent}%"),
             ("Business items left out", coverage.get("business_items_not_translated", "—")),
         )
     )
@@ -243,7 +245,7 @@ def _group_html(group: dict[str, Any], workspace_url: str | None = None) -> str:
         + (f"<h4 style='margin-top:12px'>Measure additivity (inferred)</h4>{_table(['Measure', 'Additivity', 'Why'], additivity_rows)}" if additivity_rows else "")
     )
     not_migrated_rows = [
-        [escape(str(item.get("name", "—"))), escape(plain_language(str(item.get("reason", "—"))))]
+        [escape(str(item.get("name", "—"))), escape(plain_language(str(item.get("reason", "—")), source_label(group)))]
         for item in group.get("items_not_translated", [])
     ]
     approximation_rows = [

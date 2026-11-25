@@ -8,16 +8,18 @@ import sys
 import tempfile
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT.parents[1] / "scripts"))
 from install_settings import load_settings, workflow_variables, write_overrides  # noqa: E402
 AUTOMATION_ENDPOINT = "/api/2.0/alerts-internal/scheduled-insights"
+# Prompt files beneath prompts/: tableau/ holds Tableau-specific prompts; shared/ works for every source system.
 AUTOMATIONS = {
-    "semantic_grouping": "group_semantic_datasources.md",
-    "import_metric_view": "import_metric_view.md",
-    "repair_metric_view": "repair_metric_view.md",
+    "semantic_grouping": "tableau/group_semantic_datasources.md",
+    "import_metric_view": "tableau/import_metric_view.md",
+    "repair_metric_view": "shared/repair_metric_view.md",
 }
 
 
@@ -57,15 +59,32 @@ def create_automation(*, profile: str, prompt: str, user_id: str) -> str:
     return str(response["name"])
 
 
-def automation_id(*, profile: str, target: str, automation_name: str, recreate: bool) -> str:
+def stored_automation_prompt(*, profile: str, name: str) -> str | None:
+    """Prompt of an existing automation, or None if it no longer exists."""
+    try:
+        response = run_cli(
+            ["api", "get", f"{AUTOMATION_ENDPOINT}/get?name={quote(name, safe='')}", "--output", "json"],
+            profile=profile,
+        )
+    except subprocess.CalledProcessError as error:
+        message = f"{error.stderr or ''}{error.stdout or ''}".casefold()
+        if any(text in message for text in ("not found", "does not exist", "not_found", "does_not_exist")):
+            return None
+        raise
+    return str((response or {}).get("user_prompt", ""))
+
+
+def automation_id(*, profile: str, target: str, automation_name: str) -> str:
+    """Automation whose prompt matches prompts/<file>; a new one is created when the file changed."""
     state_path = ROOT / ".databricks" / f"genie-code-{target}.json"
     state = json.loads(state_path.read_text(encoding="utf-8")) if state_path.is_file() else {}
     if state.get("configuration_id") and "import_metric_view" not in state:
         state["import_metric_view"] = state.pop("configuration_id")
-    if state.get(automation_name) and not recreate:
-        return str(state[automation_name])
-    current_user = run_cli(["current-user", "me", "--output", "json"], profile=profile)
     prompt = (ROOT / "prompts" / AUTOMATIONS[automation_name]).read_text(encoding="utf-8")
+    stored = state.get(automation_name)
+    if stored and stored_automation_prompt(profile=profile, name=str(stored)) == prompt:
+        return str(stored)
+    current_user = run_cli(["current-user", "me", "--output", "json"], profile=profile)
     configuration_id = create_automation(profile=profile, prompt=prompt, user_id=str(current_user["id"]))
     state_path.parent.mkdir(parents=True, exist_ok=True)
     state[automation_name] = configuration_id
@@ -113,7 +132,6 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Deploy the datasource semantic migration workflow")
     parser.add_argument("--profile", default="DEFAULT")
     parser.add_argument("--target", default="dev")
-    parser.add_argument("--recreate-automation", action="store_true")
     return parser.parse_args()
 
 
@@ -143,7 +161,6 @@ def main() -> None:
         profile=arguments.profile,
         target=arguments.target,
         automation_name="semantic_grouping",
-        recreate=arguments.recreate_automation,
     )
     configure_genie_task(
         profile=arguments.profile,
@@ -159,7 +176,6 @@ def main() -> None:
         profile=arguments.profile,
         target=arguments.target,
         automation_name="import_metric_view",
-        recreate=arguments.recreate_automation,
     )
     configure_genie_task(
         profile=arguments.profile,
@@ -179,7 +195,6 @@ def main() -> None:
         profile=arguments.profile,
         target=arguments.target,
         automation_name="repair_metric_view",
-        recreate=arguments.recreate_automation,
     )
     configure_genie_task(
         profile=arguments.profile,

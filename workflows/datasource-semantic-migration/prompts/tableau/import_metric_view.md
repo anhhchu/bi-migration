@@ -13,4 +13,14 @@ Read the group manifest, mapping, target profile, Datasource IR, and Metric IR p
 
 Preserve supported datasource calculations, relationships, filters, aggregations, LOD semantics, parameters, units, formats, comments, display names, and synonyms. Leave unsupported or ambiguous semantics out rather than approximating them.
 
-Write JSON to `{{importbi_result_path}}` containing at least: `metric_view_fqn`, `status`, `dimensions_created`, `measures_created`, `items_not_translated`, `source_tables_used`, and `notes`. Status must be `SUCCESS`, `PARTIAL`, or `FAILED`. If no Metric View is saved, write `FAILED` and fail the task.
+Write JSON to `{{importbi_result_path}}` matching `schemas/v1/importbi-result.schema.json`:
+
+- `metric_view_fqn` — the Metric View created or replaced, or `null` if none was saved.
+- `status` — `SUCCESS`, `PARTIAL`, or `FAILED`.
+- `dimensions_created`, `measures_created` — lists of field names, not counts.
+- `items_not_translated` — list of objects with `name` and `reason` for every Tableau field left out.
+- `source_tables_used` — list of physical tables the Metric View reads.
+- `notes` — list of strings.
+- Optional: `parameters_created` (list of names) and `approximations` (objects with `name` and `detail`) for any translated item that is not an exact equivalent.
+
+If no Metric View is saved, write `FAILED` and fail the task.

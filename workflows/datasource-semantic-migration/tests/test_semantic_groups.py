@@ -6,17 +6,18 @@ from pathlib import Path
 import yaml
 import pytest
 
-from datasource_semantic_migration.discovery import sha256_file
-from datasource_semantic_migration.metric_compiler import compile_metric_ir
+from datasource_semantic_migration.artifacts import sha256_file
+from datasource_semantic_migration.sources.tableau.metric_compiler import compile_metric_ir
 from datasource_semantic_migration.semantic_groups import (
     _mapping_targets,
     _relation_name,
+    _validate_grouping_proposal,
     build_grouping_request,
     build_semantic_groups,
     semantic_features,
     semantic_similarity,
 )
-from datasource_semantic_migration.tableau_parser import parse_tableau_datasource
+from datasource_semantic_migration.sources.tableau.parser import parse_tableau_datasource
 
 
 def tableau_artifacts(tmp_path: Path):
@@ -159,6 +160,7 @@ def test_build_semantic_groups_writes_readable_group_contract(tmp_path):
     assert Path(group["source_summary_path"]).is_file()
     manifest = json.loads(Path(group["group_manifest_path"]).read_text(encoding="utf-8"))
     assert manifest["display_name"] == "Superstore"
+    assert manifest["source_system"] == group["source_system"] == "tableau"
     assert manifest["candidate_metric_view_fqn"].startswith("main.bi_migration.bim_superstore_")
     immutable_mapping = yaml.safe_load(Path(manifest["mapping_path"]).read_text(encoding="utf-8"))
     assert immutable_mapping["table_mappings"]
@@ -192,3 +194,23 @@ def test_grouping_request_preserves_approved_business_context(tmp_path):
 
     assert request["datasources"][0]["business_domains"] == ["Retail"]
     assert request["datasources"][0]["mapping_display_names"] == ["Orders"]
+
+
+def test_grouping_proposal_rejects_group_that_mixes_bi_tools():
+    assets = [
+        {"datasource_id": "sales-tableau", "source_system": "tableau", "target_tables": ["main.sales.orders"], "target_schemas": ["sales"]},
+        {"datasource_id": "sales-powerbi", "source_system": "powerbi", "target_tables": ["main.sales.orders"], "target_schemas": ["sales"]},
+    ]
+    proposal = {
+        "groups": [
+            {
+                "display_name": "Sales",
+                "member_datasource_ids": ["sales-tableau", "sales-powerbi"],
+                "helper_datasource_ids": [],
+                "confidence": 0.9,
+            }
+        ],
+        "ungrouped_datasources": [],
+    }
+    with pytest.raises(ValueError, match="mixes BI tools"):
+        _validate_grouping_proposal(proposal, assets)

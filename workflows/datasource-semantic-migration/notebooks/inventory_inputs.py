@@ -4,7 +4,7 @@ from pathlib import Path
 
 from datasource_semantic_migration.analysis_batches import build_analysis_batches
 from datasource_semantic_migration.config import WorkflowConfig
-from datasource_semantic_migration.discovery import discover_inputs, write_inventory
+from datasource_semantic_migration.sources.tableau.discovery import discover_inputs, write_inventory
 from datasource_semantic_migration.manifest import build_workflow_manifest
 from datasource_semantic_migration.notebook_results import format_notebook_result, render_volume_links_html
 

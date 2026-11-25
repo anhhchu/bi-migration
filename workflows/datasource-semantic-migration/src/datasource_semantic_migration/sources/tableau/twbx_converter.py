@@ -15,8 +15,9 @@ from typing import Any
 from urllib.parse import unquote
 from xml.etree import ElementTree
 
-from .discovery import DiscoveryLimits, UnsafeArchiveError, inspect_tds, safely_extract_tdsx, sha256_file
-from .tableau_parser import parse_tableau_datasource
+from ...artifacts import sha256_file
+from .discovery import DiscoveryLimits, UnsafeArchiveError, inspect_tds, safely_extract_tdsx
+from .parser import parse_tableau_datasource
 
 
 PACKAGED_DATA_SUFFIXES = {

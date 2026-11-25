@@ -6,7 +6,7 @@ import yaml
 
 from datasource_semantic_migration.metric_repair import apply_metric_patch, build_deterministic_patch, document_hash
 from datasource_semantic_migration.notebook_results import format_notebook_result, render_volume_links_html
-from datasource_semantic_migration.tableau_parser import write_json_artifact
+from datasource_semantic_migration.artifacts import write_json_artifact
 
 
 dbutils.widgets.text("attempt_dir", "")

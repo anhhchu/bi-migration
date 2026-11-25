@@ -8,7 +8,7 @@ from datasource_semantic_migration.notebook_results import (
     summarize_semantic_groups,
 )
 from datasource_semantic_migration.reporting import build_grouping_review, render_grouping_review_html
-from datasource_semantic_migration.tableau_parser import write_json_artifact
+from datasource_semantic_migration.artifacts import write_json_artifact
 
 
 for widget_name in ("manifest_path", "groups_index_path", "migration_job_id"):

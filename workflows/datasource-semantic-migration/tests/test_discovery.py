@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from datasource_semantic_migration.discovery import UnsafeArchiveError, discover_inputs
+from datasource_semantic_migration.sources.tableau.discovery import UnsafeArchiveError, discover_inputs
 
 
 def _sample_tds() -> Path:

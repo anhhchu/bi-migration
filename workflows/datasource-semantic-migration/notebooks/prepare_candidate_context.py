@@ -6,7 +6,7 @@ import yaml
 from pyspark.sql import functions as F
 
 from datasource_semantic_migration.notebook_results import format_notebook_result, render_volume_links_html
-from datasource_semantic_migration.tableau_parser import write_json_artifact
+from datasource_semantic_migration.artifacts import write_json_artifact
 
 
 for widget_name in ("semantic_groups_index_path", "group_selector", "warehouse_id"):
@@ -166,7 +166,17 @@ Create or replace exactly this candidate Unity Catalog Metric View:
 
 Do not create or modify dashboards or Genie Agents. Use only the exact physical Databricks tables declared in the mapping. Preserve supported calculations, relationships, filters, aggregations, LOD semantics, parameters, units, formats, comments, display names, and synonyms. Leave unsupported or ambiguous semantics out rather than approximating them.
 
-Write a JSON result to `{result_path}` containing: metric_view_fqn, status, dimensions_created, measures_created, items_not_translated, source_tables_used, and notes. Status must be SUCCESS, PARTIAL, or FAILED. If no Metric View is saved, write FAILED and fail the task.
+Write a JSON result to `{result_path}` with these fields:
+
+- metric_view_fqn: the Metric View created or replaced, or null if none was saved.
+- status: SUCCESS, PARTIAL, or FAILED.
+- dimensions_created, measures_created: lists of field names, not counts.
+- items_not_translated: list of objects with name and reason for every Tableau field left out.
+- source_tables_used: list of physical tables the Metric View reads.
+- notes: list of strings.
+- Optional: parameters_created (list of names) and approximations (objects with name and detail) for any translated item that is not an exact equivalent.
+
+If no Metric View is saved, write FAILED and fail the task.
 """,
     encoding="utf-8",
 )

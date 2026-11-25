@@ -2,22 +2,52 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://databricks.example/bi-migration/importbi-result/1.0",
   "title": "Semantic-only ImportBI Construction Result",
+  "description": "Written by the Genie /importBI task to importbi-result.json, or rebuilt from the catalog by reconcile_evaluate_repair when the task wrote nothing. Read by reconcile_evaluate_repair and reporting.build_group_review.",
   "type": "object",
-  "required": ["schema_version", "workflow_run_id", "group_id", "status", "requested_metric_view_fqn", "created_metric_view_fqn", "construction_method", "source_tables", "dimensions_created", "measures_created", "unsupported_items", "metric_view_yaml_path"],
+  "required": [
+    "metric_view_fqn",
+    "status",
+    "dimensions_created",
+    "measures_created",
+    "items_not_translated",
+    "source_tables_used",
+    "notes"
+  ],
   "properties": {
-    "schema_version": {"const": "1.0"},
-    "workflow_run_id": {"type": "string", "minLength": 1},
-    "group_id": {"type": "string", "minLength": 1},
-    "status": {"enum": ["SUCCESS", "PARTIAL", "FAILED"]},
-    "requested_metric_view_fqn": {"type": "string", "minLength": 1},
-    "created_metric_view_fqn": {"type": ["string", "null"]},
-    "construction_method": {"enum": ["IMPORTBI", "DETERMINISTIC_FALLBACK"]},
-    "source_tables": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
-    "dimensions_created": {"type": "array", "items": {"type": "string"}},
-    "measures_created": {"type": "array", "items": {"type": "string"}},
-    "unsupported_items": {"type": "array", "items": {"type": "object"}},
-    "metric_view_yaml_path": {"type": ["string", "null"]},
-    "created_asset_ids": {"type": "array", "items": {"type": "string"}}
+    "metric_view_fqn": {"type": ["string", "null"], "description": "Candidate Metric View created or replaced; null when none was saved."},
+    "status": {
+      "enum": ["SUCCESS", "PARTIAL", "FAILED", "RECOVERED_FROM_CATALOG"],
+      "description": "The agent writes SUCCESS, PARTIAL, or FAILED. RECOVERED_FROM_CATALOG is reserved for the reconciliation fallback and means items_not_translated is unknown."
+    },
+    "dimensions_created": {"type": "array", "items": {"type": "string"}, "description": "Dimension names, not a count."},
+    "measures_created": {"type": "array", "items": {"type": "string"}, "description": "Measure names, not a count."},
+    "parameters_created": {"type": "array", "items": {"type": "string"}},
+    "items_not_translated": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "reason"],
+        "properties": {
+          "name": {"type": "string", "minLength": 1, "description": "Field name, or comma-separated names for a grouped entry."},
+          "reason": {"type": "string", "minLength": 1},
+          "kind": {"type": "string", "description": "Optional item kind, for example calculation or filter."}
+        }
+      }
+    },
+    "approximations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "detail"],
+        "properties": {
+          "name": {"type": "string", "minLength": 1},
+          "detail": {"type": "string", "minLength": 1}
+        }
+      }
+    },
+    "source_tables_used": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+    "validation": {"type": "object"},
+    "notes": {"type": "array", "items": {"type": "string"}}
   },
-  "additionalProperties": false
+  "additionalProperties": true
 }
