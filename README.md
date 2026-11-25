@@ -27,7 +27,16 @@ python3 scripts/install.py --profile my-ws --catalog <existing-catalog>
 
 `install.py` checks access, picks a SQL warehouse, shows a plan, and asks before creating the schemas and Volumes it needs. It deploys the workflow Jobs (with their Genie Code tasks) and the App, wired together, and prints the App URL. It also deploys the paused dashboard Jobs, which the App still references. Options and permissions: [Installation guide](app/bi-migration-review/docs/INSTALLATION_GUIDE.md).
 
-Workspace choices (catalog, schemas, Volumes, warehouse) are saved per CLI profile in `.databricks/bi-migration/<profile>.json` (gitignored), not in `databricks.yml`. To redeploy after code changes:
+No permission to create schemas or Volumes? Ask an admin for an existing schema (with `CREATE TABLE`) and two Volumes (read and write), then point the installer at them:
+
+```bash
+python3 scripts/install.py --profile my-ws --catalog <catalog> --schema <schema> \
+  --output-volume <catalog>.<schema>.<volume> --upload-volume <catalog>.<schema>.<volume>
+```
+
+Other options: `--app-name` (the App name must be unique in the workspace), `--warehouse-id`, `--yes`, and `--configure-only` (record settings for an existing install). All options and permissions: [Installation guide](app/bi-migration-review/docs/INSTALLATION_GUIDE.md).
+
+Workspace choices (catalog, schemas, Volumes, warehouse, App name) are saved per CLI profile in `.databricks/bi-migration/<profile>.json` (gitignored), not in `databricks.yml`. To redeploy after code changes:
 
 ```bash
 (cd workflows/datasource-semantic-migration && uv run python deploy.py --profile my-ws --target dev)  # workflow
@@ -43,7 +52,7 @@ Use these scripts rather than plain `databricks bundle deploy`: they set the Gen
    ```text
    <input-folder>/
      datasources/   *.tds, *.tdsx
-     mappings/      table-mapping.yaml   (Tableau tables → Databricks tables; see the Mapping guide)
+     mappings/      any YAML, JSON, or CSV pairing Tableau tables with Databricks tables (see the Mapping guide)
    ```
 
 2. Open the App → **Migrate semantic models** → propose, approve, and review.
@@ -61,15 +70,16 @@ Candidate Metric Views are created as `<catalog>.<schema>.bim_<group>_<hash>_can
 
 ## Repository layout
 
-- `workflows/datasource-semantic-migration/` — the semantic migration workflow: parser, evaluator, repair, reports, Jobs, and tests.
+- `workflows/datasource-semantic-migration/` — the semantic migration workflow: Jobs, evaluator, repair, reports, and tests. Source-specific parsing lives in `src/datasource_semantic_migration/sources/<source>/` (today `tableau/`; Power BI is planned).
+- `workflows/dashboard-migration/` — dashboard migration (paused): inventory, `/importBI` dashboard prompts, and its Job notebooks. The root bundle still deploys its Jobs.
 - `app/bi-migration-review/` — the Databricks App (AppKit, React).
 - `scripts/install.py`, `scripts/deploy.py` — install and deploy everything.
-- Dashboard migration (paused): `src/bi_migration/`, `notebooks/`, `prompts/`, `schemas/`, `skills/`, `tests/`.
 
 ## Development
 
 ```bash
 (cd workflows/datasource-semantic-migration && uv run pytest)   # workflow tests
+(cd workflows/dashboard-migration && uv run pytest)             # paused dashboard migration tests
 (cd app/bi-migration-review && npm install && npm test)         # App tests
 (cd app/bi-migration-review && npm run dev)                     # local App, see its README
 ```

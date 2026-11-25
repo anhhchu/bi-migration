@@ -2,19 +2,26 @@
 
 ## Project Structure & Module Organization
 
-- `src/bi_migration/` contains the Python inventory, Tableau parsing, grouping, mapping, preflight, and pipeline modules. The `bi-migrate` CLI entry point is in `cli.py`.
-- `tests/` contains pytest tests; small Tableau fixtures live under `tests/fixtures/tableau/`.
+- `workflows/datasource-semantic-migration/` is the active semantic-model workflow (its own bundle, `deploy.py`, and tests). Code shared by every BI tool sits in `src/datasource_semantic_migration/`; each BI tool's parsing sits in `sources/<source>/` (today `tableau/`). Prompts sit in `prompts/<source>/` or `prompts/shared/`.
+- `workflows/dashboard-migration/` is the paused dashboard workflow: `src/bi_migration/` (inventory, grouping, mapping, preflight, pipeline; `bi-migrate` CLI in `cli.py`), Job `notebooks/`, `prompts/`, `schemas/`, `skills/`, and `tests/` (fixtures in `tests/fixtures/tableau/`). The root `databricks.yml` and `scripts/deploy.py` still deploy its Jobs.
 - `app/bi-migration-review/` is the Databricks AppKit application. Backend routes are in `server/server.ts`; React UI code is in `client/src/`.
-- `notebooks/` contains inspectable Databricks Job tasks. `prompts/`, `schemas/`, and `skills/` hold workflow contracts and supporting instructions.
 - Treat `build/` and generated app `dist/` directories as disposable artifacts.
 
 ## Build, Test, and Development Commands
 
+From `workflows/datasource-semantic-migration/`:
+
+- `uv run pytest` runs the workflow tests.
+- `uv run python deploy.py --profile DEFAULT --target dev` deploys the workflow.
+
+From `workflows/dashboard-migration/`:
+
+- `uv run pytest` runs the paused dashboard migration tests.
+- `uv run bi-migrate backend ...` runs its inventory and mapping pipeline.
+
 From the repository root:
 
-- `uv run pytest` runs the Python test suite.
-- `uv run bi-migrate backend ...` runs the production-oriented inventory and mapping pipeline; see `README.md` for arguments.
-- `databricks bundle validate -t dev --profile DEFAULT` validates Databricks resources.
+- `databricks bundle validate -t dev --profile DEFAULT` validates the App bundle.
 
 From `app/bi-migration-review/`:
 

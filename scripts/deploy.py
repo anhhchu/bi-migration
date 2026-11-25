@@ -193,7 +193,8 @@ def main() -> None:
 
     current_user = run_json(args.profile, "current-user", "me")["userName"]
     bundle_root = f"/Workspace/Users/{current_user}/.bundle/bi-migration-review/{args.target}/files"
-    notebooks = f"{bundle_root}/notebooks"
+    # The paused dashboard migration notebooks; the bundle syncs them beneath this folder.
+    notebooks = f"{bundle_root}/workflows/dashboard-migration/notebooks"
     # Match the bundle's development-mode prefix so API-managed Jobs sit beside bundle Jobs.
     short_name = re.sub(r"[^A-Za-z0-9]+", "_", current_user.split("@")[0]).strip("_")
     name_prefix = f"[dev {short_name}]" if args.target == "dev" else f"[{args.target}]"

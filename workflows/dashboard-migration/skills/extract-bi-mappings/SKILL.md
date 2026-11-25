@@ -16,7 +16,7 @@ Use Genie Code for document interpretation and the project CLI for deterministic
 
 ## Workflow
 
-1. Run the deterministic pipeline once to extract source fields and suggestions: `uv run bi-migrate backend --input <path> --target-metadata <json> --domain <domain> --output <path>`.
+1. From `workflows/dashboard-migration/`, run the deterministic pipeline once to extract source fields and suggestions: `uv run bi-migrate backend --input <path> --target-metadata <json> --domain <domain> --output <path>`.
 2. Review `inventory.json`, `dependency_graph.json`, `groups.json`, and each group's `mapping_template.csv`.
 3. Interpret the user's mapping material against the extracted source fields and authorized target metadata.
 4. Write a canonical CSV, JSON, or YAML mapping evidence file using the contract below. Preserve uncertainty; do not invent missing values.

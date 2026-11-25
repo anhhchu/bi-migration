@@ -80,7 +80,7 @@ resources:
       tasks:
         - task_key: inventory
           notebook_task:
-            notebook_path: ./notebooks/inventory.py
+            notebook_path: ./workflows/dashboard-migration/notebooks/inventory.py
             base_parameters:
               input_path: ""
               mapping_docs_path: ""
@@ -94,12 +94,13 @@ resources:
           spec:
             environment_version: "4"
             dependencies:
-              - ./dist/*.whl
+              - ./workflows/dashboard-migration/dist/*.whl
 
+# The paused dashboard migration code is packaged from its own folder.
 artifacts:
   default:
     type: whl
-    path: .
+    path: ./workflows/dashboard-migration
     build: uv build
 
 # Volumes and Job IDs differ per workspace: scripts/install.py saves them per CLI profile, and
