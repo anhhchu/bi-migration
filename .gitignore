@@ -21,3 +21,6 @@ workflows/datasource-semantic-migration/datasource-samples/
 
 # Local browser-automation screenshots and snapshots
 .playwright-mcp/
+
+# Local notes (demo talk tracks); never committed
+docs/local/

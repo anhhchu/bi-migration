@@ -75,4 +75,10 @@ python3 scripts/install.py --profile my-ws --catalog <catalog> --schema <schema>
 | An existing schema with `CREATE VOLUME`          | `--schema <existing>`; the installer creates the two Volumes in it                        |
 | An existing schema and Volumes, no create rights | `--schema <existing> --output-volume <c.s.v> --upload-volume <c.s.v>`; nothing is created |
 
+Good to know:
+
+- The installer does not check `CREATE TABLE`; a missing grant shows up when the first migration creates a Metric View.
+- Changing `--app-name` on an existing install replaces the App: the old one is deleted and a new one created.
+- Jobs are per user. A second install by the same user in the same workspace, even with another App name, reuses and repoints that user's Jobs.
+
 Always needed: `USE CATALOG` and `USE SCHEMA`, `CREATE TABLE` on the schema (Metric Views are created there), `READ VOLUME` and `WRITE VOLUME` on both Volumes, `SELECT` on the Databricks tables your mapping points to, and permission to create Jobs and Apps. Give App users `READ VOLUME` on the run-artifacts Volume.

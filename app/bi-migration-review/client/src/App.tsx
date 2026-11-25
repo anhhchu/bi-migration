@@ -426,7 +426,7 @@ type SemanticGroupReview = {
     action_groups?: ActionGroups;
     candidate?: { metric_view_fqn?: string };
     coverage?: {
-      semantic_coverage_percent?: number;
+      semantic_coverage_percent?: number | null;
       dimensions_created?: number;
       measures_created?: number;
       business_items_not_translated?: number;
@@ -1034,7 +1034,8 @@ export default function App() {
   );
 }
 
-const isTableMappingFile = (name: string) => /^table-mapping\.(csv|ya?ml)$/i.test(name);
+// Any YAML, JSON, or CSV mapping file is read; several are merged.
+const isTableMappingFile = (name: string) => /\.(csv|ya?ml|json)$/i.test(name);
 
 function UploadPanel({
   migrationMode,
@@ -1320,7 +1321,7 @@ function UploadPanel({
             </label>
             <p>
               {migrationMode === 'semantic_model'
-                ? 'TDS/TDSX plus table-mapping CSV or YAML, up to 100 MB each.'
+                ? 'TDS/TDSX plus a table mapping (YAML, JSON, or CSV; any shape that pairs Tableau and Databricks tables), up to 100 MB each.'
                 : 'TWB/TWBX plus CSV, JSON, YAML, or Markdown mappings, up to 100 MB each.'}
             </p>
             <input
@@ -1330,7 +1331,7 @@ function UploadPanel({
               type="file"
               accept={
                 migrationMode === 'semantic_model'
-                  ? '.tds,.tdsx,.csv,.yaml,.yml'
+                  ? '.tds,.tdsx,.csv,.yaml,.yml,.json'
                   : '.twb,.twbx,.csv,.json,.yaml,.yml,.md'
               }
               multiple
@@ -1472,7 +1473,7 @@ function UploadPanel({
                     file.kind === 'Mapping evidence' &&
                     !isTableMappingFile(file.name) ? (
                       <small className="upload-file__warning">
-                        Not used: the workflow reads only table-mapping.yaml, .yml, or .csv.
+                        Not used: table mappings must be YAML, JSON, or CSV.
                       </small>
                     ) : null}
                     {file.volumePath ? (
@@ -1556,7 +1557,7 @@ function UploadPanel({
               {hasTableMapping ? <CheckCircle2 aria-hidden="true" /> : <AlertCircle aria-hidden="true" />}
               {hasTableMapping
                 ? 'Table mapping file'
-                : 'Upload a mapping named table-mapping.yaml, table-mapping.yml, or table-mapping.csv'}
+                : 'Upload a table mapping (YAML, JSON, or CSV) that pairs Tableau tables with Databricks tables'}
             </li>
           </ul>
         ) : null}
@@ -2133,7 +2134,7 @@ function SemanticGroupReviewPanel({
             <div>
               <span>Semantic coverage</span>
               <strong>
-                {migration?.coverage?.semantic_coverage_percent !== undefined
+                {migration?.coverage?.semantic_coverage_percent != null
                   ? `${migration.coverage.semantic_coverage_percent}%`
                   : '—'}
               </strong>

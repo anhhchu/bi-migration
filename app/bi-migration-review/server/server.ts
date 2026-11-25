@@ -6,7 +6,7 @@ import { parse as parseYaml } from 'yaml';
 import { stringify as stringifyYaml } from 'yaml';
 import { z } from 'zod';
 import type { Request, Response } from 'express';
-import { semanticInputRoot } from './semantic-input';
+import { MAPPING_FILE, semanticInputRoot } from './semantic-input';
 
 // Databricks Apps provide DATABRICKS_HOST at runtime; derive the URL used for workspace links from it.
 if (!process.env.DATABRICKS_WORKSPACE_URL && process.env.DATABRICKS_HOST) {
@@ -735,7 +735,7 @@ await createApp({
           const inputRoot = semanticInputRoot(parsed.data.datasourcePath, parsed.data.mappingPath);
           const volume = volumeHandle(request);
           const normalizedMappingPath = normalizeVolumePath(parsed.data.mappingPath);
-          const mappingDirectory = /\/table-mapping\.(csv|ya?ml)$/i.test(normalizedMappingPath)
+          const mappingDirectory = MAPPING_FILE.test(normalizedMappingPath)
             ? normalizedMappingPath.slice(0, normalizedMappingPath.lastIndexOf('/'))
             : normalizedMappingPath;
           // List folders instead of exists(): exists() does not report directories.
@@ -757,17 +757,17 @@ await createApp({
             return;
           }
           const mappingNames = (mappingEntries ?? []).map(entryName);
-          const requestedMappingFile = /\/table-mapping\.(csv|ya?ml)$/i.test(normalizedMappingPath)
+          const requestedMappingFile = MAPPING_FILE.test(normalizedMappingPath)
             ? normalizedMappingPath.split('/').pop()
             : null;
           const hasSupportedMapping = requestedMappingFile
             ? mappingNames.includes(requestedMappingFile)
-            : mappingNames.some((name) => /^table-mapping\.(csv|ya?ml)$/i.test(name));
+            : mappingNames.some((name) => MAPPING_FILE.test(name));
           if (!mappingEntries || !hasSupportedMapping) {
             response.status(404).json({
               error: requestedMappingFile
                 ? `${normalizedMappingPath} was not found, or the App cannot read it.`
-                : `${mappingDirectory} must contain table-mapping.yaml, table-mapping.yml, or table-mapping.csv.`,
+                : `${mappingDirectory} must contain at least one .yaml, .yml, .json, or .csv mapping file.`,
             });
             return;
           }
@@ -2111,10 +2111,8 @@ await createApp({
               response.status(400).json({ error: 'Upload at least one .tds or .tdsx datasource.' });
               return;
             }
-            if (!files.some((file) => /^table-mapping\.(csv|ya?ml)$/i.test(file.name))) {
-              response
-                .status(400)
-                .json({ error: 'Upload the mapping as table-mapping.csv, table-mapping.yaml, or table-mapping.yml.' });
+            if (!files.some((file) => file.kind === 'Mapping evidence' && MAPPING_FILE.test(file.name))) {
+              response.status(400).json({ error: 'Upload a table mapping as a .yaml, .yml, .json, or .csv file.' });
               return;
             }
           }

@@ -24,7 +24,25 @@ For production-quality conversion also provide:
 
 ## Supported Files
 
-Upload `table-mapping.yaml`, `table-mapping.yml`, or `table-mapping.csv` beneath the input `mappings/` folder. The workflow accepts incomplete user documents but records missing evidence as unresolved instead of inventing joins or calculations.
+Put any YAML, JSON, or CSV file in the input `mappings/` folder; the file name doesn't matter, and several files are merged. The only requirement is a Tableau table paired with its Databricks table (`catalog.schema.table`). Any of these works:
+
+```yaml
+Orders: main.sales.orders
+Returns: main.sales.returns
+```
+
+```csv
+source_table,target_table,grain
+Orders,main.sales.orders,one row per order line
+```
+
+```yaml
+table_mappings:
+  - source: { table: Orders, datasource: Superstore }
+    target: { table: main.sales.orders, grain: one row per order line, business_keys: [order_id] }
+```
+
+Column and key names are flexible (`source_table`, `tableau_table`, `from`; `target_table`, `databricks_table`, `to`), and extra columns are ignored. Optional details such as `datasource`, `grain`, `business_keys`, and relationships improve the result. The workflow accepts incomplete documents but records missing evidence as unresolved instead of inventing joins or calculations. If a row is missing a table, the run stops with the file and row to fix.
 
 ## Review Rules
 

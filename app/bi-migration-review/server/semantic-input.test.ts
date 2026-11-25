@@ -11,6 +11,7 @@ describe('semanticInputRoot', () => {
 
   it('rejects a mapping outside a mappings folder', () => {
     expect(() => semanticInputRoot(root, `${root}/table-mapping.yaml`)).toThrow(/mappings folder/);
+    expect(semanticInputRoot(root, `${root}/mappings/my tables.csv`)).toBe(root);
   });
 
   it('rejects datasources and mappings from different input folders', () => {
