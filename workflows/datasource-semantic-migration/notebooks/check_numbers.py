@@ -5,6 +5,7 @@
 import json
 import shutil
 import tempfile
+from html import escape
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -59,7 +60,18 @@ column_mappings = {
 parity_path = internal_path / "parity"
 started_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 staging = f"{quote(catalog)}.{quote(staging_schema)}"
-result = {"schema_version": "1.0", "group_id": manifest["group_id"], "started_at": started_at, "outcomes": []}
+result = {
+    "schema_version": "1.0",
+    "group_id": manifest["group_id"],
+    "group_name": manifest.get("display_name"),
+    "metric_view_fqn": manifest["candidate_metric_view_fqn"],
+    "started_at": started_at,
+    "outcomes": [],
+}
+print("=== Datasource number check ===")
+print(f"Group:        {manifest.get('display_name') or manifest['group_id']} ({manifest['group_id']})")
+print(f"Metric View:  {manifest['candidate_metric_view_fqn']}")
+print(f"Definition:   {group_path / 'metric-view.yaml'}")
 
 
 def finish(summary_reason=None):
@@ -83,6 +95,8 @@ else:
     datasource, datasource_ir, extract = chosen
     result["datasource"] = datasource["datasource_name"]
     result["extract"] = {key: extract[key] for key in ("package_path", "member_path", "byte_size", "key")}
+    print(f"Datasource:   {datasource['datasource_name']}")
+    print(f"Extract:      {extract['member_path']} in {Path(extract['package_path']).name}")
     extract_table = f"{staging}.{quote('bim_x_' + extract['key'])}"
     shadow_view = f"{staging}.{quote('bim_shadow_' + manifest['group_id'].replace('-', '_')[:40] + '_' + extract['key'][:8])}"
     # 2. Load the extract once; later checks of the same extract reuse the table.
@@ -111,6 +125,10 @@ else:
             spark.sql(f"ALTER TABLE {extract_table} ALTER COLUMN {quote(safe)} COMMENT " + json.dumps(f"Tableau field: {original}"))
         result["extract"]["column_names"] = safe_names
     extract_columns = spark.table(extract_table).columns
+    result["extract_table"] = extract_table.replace("`", "")
+    result["shadow_metric_view"] = shadow_view.replace("`", "")
+    print(f"Extract table: {result['extract_table']} (cached)")
+    print(f"Shadow view:  {result['shadow_metric_view']} (temporary; dropped at the end)")
     # 3. The candidate source's output columns, and which extract column feeds each.
     source = str(metric_view.get("source") or "").strip()
     is_query = source.split(None, 1)[0].upper() in {"SELECT", "WITH"} if source else False
@@ -225,13 +243,47 @@ summary = build_workflow_review(workflow_run_id=manifest["workflow_run_id"], gro
 write_json_artifact(summary, run_root / "reports" / "index.json")
 (run_root / "reports" / "index.html").write_text(render_workflow_html({"workspace_url": WORKSPACE_URL, **summary}), encoding="utf-8")
 
+def _value(value):
+    """A readable number: thousands separators, at most four decimals; anything else as text."""
+    if value is None:
+        return "—"
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    return f"{number:,.0f}" if number.is_integer() else f"{number:,.4f}".rstrip("0").rstrip(".")
+
+
+rows = []
+for outcome in result["outcomes"]:
+    total = next((check for check in outcome.get("checks", []) if not check.get("grouped_by")), None)
+    pair = (total or {}).get("values", [{}])[0] if total else {}
+    checked = ", ".join(f"{check.get('grouped_by') or 'total'}: {check['status'].lower()}" for check in outcome.get("checks", []))
+    rows.append((outcome["status"], outcome["measure"], _value(pair.get("candidate")), _value(pair.get("reference")),
+                 checked or outcome.get("reason") or ""))
+print(f"\nMetric View {result['metric_view_fqn']}: {result['summary']['status']} — "
+      f"{result['summary']['compared_count']} of {result['summary']['measure_count']} measure(s) compared, "
+      f"{result['summary']['FAILED_VALUE']} differ, {result['summary']['NOT_COMPARABLE']} not compared"
+      + (f" ({result['summary']['reason']})" if result["summary"].get("reason") else ""))
+print(f"{'Result':<20} {'Measure':<32} {'Metric View total':>20} {'Extract total':>20}  Checks / reason")
+for status, measure, candidate, reference, detail in rows:
+    print(f"{status:<20} {measure[:32]:<32} {candidate:>20} {reference:>20}  {detail[:140]}")
+displayHTML(
+    f"<h3>Number check: <code>{escape(result['metric_view_fqn'])}</code></h3>"
+    f"<p>{escape(result['summary']['status'])}: {result['summary']['compared_count']} of {result['summary']['measure_count']} "
+    "measure(s) compared with the Tableau extract.</p><table><tr><th>Result</th><th>Measure</th>"
+    "<th>Metric View total</th><th>Extract total</th><th>Checks / reason</th></tr>"
+    + "".join(f"<tr><td>{escape(a)}</td><td>{escape(b)}</td><td>{escape(c)}</td><td>{escape(d)}</td><td>{escape(e)}</td></tr>" for a, b, c, d, e in rows)
+    + "</table>"
+)
+
 output = {
     "group_id": manifest["group_id"],
+    "metric_view_fqn": result["metric_view_fqn"],
     "parity": result["summary"],
     "parity_results_path": str(parity_path / "parity-results.json"),
     "report_path": str(group_report_path / "migration-review.html"),
 }
-print("\n=== Datasource number check ===")
 print(format_notebook_result(output))
 displayHTML(render_volume_links_html(output))
 dbutils.notebook.exit(format_notebook_result(output))
