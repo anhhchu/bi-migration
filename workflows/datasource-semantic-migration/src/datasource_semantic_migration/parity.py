@@ -437,7 +437,9 @@ def measure_outcomes(plans: list[dict[str, Any]], comparisons: list[dict[str, di
             continue
         checks = [comparison[name] for comparison in comparisons if name in comparison]
         if checks and all(check["status"] == "EMPTY" for check in checks):
-            outcomes.append({"measure": name, "status": "NOT_COMPARABLE", "reason": "Both sides returned no values, so nothing was compared.", "checks": checks})
+            outcomes.append({"measure": name, "status": "NOT_COMPARABLE", "reason": ("The measure is empty for every group, in the source definition as well as the Metric View, so nothing "
+                           "could be compared. Check the formula: for example a per-row difference of two fields that are "
+                           "never set on the same row is always empty."), "checks": checks})
             continue
         checks = [check for check in checks if check["status"] != "EMPTY"] or checks
         if not checks:
