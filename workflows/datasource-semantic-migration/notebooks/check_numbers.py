@@ -16,6 +16,7 @@ from datasource_semantic_migration.notebook_results import format_notebook_resul
 from datasource_semantic_migration.parity import (
     bind_columns,
     candidate_dimensions,
+    safe_column_names,
     choose_dimensions,
     compare_results,
     comparison_queries,
@@ -95,11 +96,20 @@ else:
             shutil.rmtree(work, ignore_errors=True)
         table = main_table(tables)
         result["extract"]["tables"] = [{key: item[key] for key in ("table", "rows")} for item in tables]
-        spark.sql(f"CREATE TABLE IF NOT EXISTS {extract_table} AS SELECT * FROM parquet.`{table['parquet_path']}`")
+        # Tableau names (Business Unit) become Delta-safe names (business_unit); comments keep the original.
+        safe_names = safe_column_names(table["columns"])
+        select_list = ", ".join(f"{quote(original)} AS {quote(safe)}" for original, safe in safe_names.items())
+        spark.sql(
+            f"CREATE TABLE IF NOT EXISTS {extract_table} "
+            f"AS SELECT {select_list} FROM parquet.`{table['parquet_path']}`"
+        )
         spark.sql(
             f"COMMENT ON TABLE {extract_table} IS "
             + json.dumps(f"Tableau extract {extract['member_path']} from {Path(extract['package_path']).name}; for number checks")
         )
+        for original, safe in safe_names.items():
+            spark.sql(f"ALTER TABLE {extract_table} ALTER COLUMN {quote(safe)} COMMENT " + json.dumps(f"Tableau field: {original}"))
+        result["extract"]["column_names"] = safe_names
     extract_columns = spark.table(extract_table).columns
     # 3. The candidate source's output columns, and which extract column feeds each.
     source = str(metric_view.get("source") or "").strip()

@@ -37,6 +37,26 @@ def column_key(name: str | None) -> str:
     return re.sub(r"[^a-z0-9]+", "_", (name or "").casefold()).strip("_")
 
 
+def safe_column_names(names: list[str]) -> dict[str, str]:
+    """Delta-safe snake_case name for each extract column (Business Unit -> business_unit), unique.
+
+    Delta rejects spaces and ' ,;{}()=' in column names without column mapping; matching already
+    compares names in this normalized form, so nothing is lost.
+    """
+    result: dict[str, str] = {}
+    used: set[str] = set()
+    for name in names:
+        base = column_key(name) or "column"
+        if base[0].isdigit():
+            base = f"c_{base}"
+        safe, suffix = base, 2
+        while safe in used:
+            safe, suffix = f"{base}_{suffix}", suffix + 1
+        used.add(safe)
+        result[name] = safe
+    return result
+
+
 def quote(identifier: str) -> str:
     return "`" + identifier.replace("`", "``") + "`"
 

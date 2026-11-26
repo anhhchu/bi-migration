@@ -102,3 +102,15 @@ def test_values_compare_exactly_within_tolerance_or_not():
     assert outcomes == {"Sales": "PASS_EXACT", "Orders": "FAILED_VALUE", "Ratio": "PASS_WITH_TOLERANCE", "Days": "NOT_COMPARABLE"}
     summary = parity_summary(measure_outcomes(plans, [results]), available=True)
     assert summary["status"] == "MISMATCH" and summary["compared_count"] == 3
+
+
+def test_extract_columns_get_unique_delta_safe_names():
+    from datasource_semantic_migration.parity import safe_column_names
+
+    assert safe_column_names(["Business Unit", "Sub-Category", "Sub Category", "2024 Target", "Profit (bin)"]) == {
+        "Business Unit": "business_unit",
+        "Sub-Category": "sub_category",
+        "Sub Category": "sub_category_2",
+        "2024 Target": "c_2024_target",
+        "Profit (bin)": "profit_bin",
+    }
