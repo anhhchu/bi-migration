@@ -415,8 +415,12 @@ type SemanticGroupReview = {
     grouping_rationale?: string;
     datasource_count?: number;
     target_tables?: string[];
-    datasources?: Array<{ datasource_name?: string; source_path?: string }>;
-    supporting_datasources?: Array<{ datasource_name?: string; source_path?: string }>;
+    datasources?: Array<{ datasource_name?: string; source_path?: string; extract_origin?: { label?: string } | null }>;
+    supporting_datasources?: Array<{
+      datasource_name?: string;
+      source_path?: string;
+      extract_origin?: { label?: string } | null;
+    }>;
   } | null;
   migrationReview?: {
     status?: string;
@@ -2069,6 +2073,7 @@ function GroupMembership({ summary }: { summary: SemanticGroupReview['sourceSumm
             <TableRow>
               <TableHead>Tableau datasource</TableHead>
               <TableHead>File</TableHead>
+              <TableHead>Data</TableHead>
               <TableHead>Role</TableHead>
             </TableRow>
           </TableHeader>
@@ -2079,6 +2084,7 @@ function GroupMembership({ summary }: { summary: SemanticGroupReview['sourceSumm
                 <TableCell>
                   <code>{fileName(item.source_path)}</code>
                 </TableCell>
+                <TableCell>{item.extract_origin?.label ?? '—'}</TableCell>
                 <TableCell>{item.role}</TableCell>
               </TableRow>
             ))}

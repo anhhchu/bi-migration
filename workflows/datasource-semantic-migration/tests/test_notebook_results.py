@@ -72,7 +72,7 @@ def test_semantic_group_summary_exposes_index_sources_targets_and_migration_stat
             "group_name": "orders-superstore",
             "status": "READY_FOR_PREFLIGHT",
             "will_migrate": True,
-            "datasources": [{"name": "Orders", "file": "superstore-orders.tdsx", "role": "PRIMARY"}],
+            "datasources": [{"name": "Orders", "file": "superstore-orders.tdsx", "role": "PRIMARY", "data": "—"}],
             "target_tables": ["main.superstore.orders"],
             "candidate_metric_view": "main.metrics.orders_candidate",
         }

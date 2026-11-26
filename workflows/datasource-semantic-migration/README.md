@@ -153,7 +153,9 @@ Any file name works, and several mapping files are merged. Each entry needs a Ta
 
 The mapping should identify the physical Databricks tables corresponding to Tableau source tables. Add grain, keys, relationships, temporal predicates, current-record filters, and unit conversions when known. See `datasource-samples/table-mapping.yaml`.
 
-The workflow does not substitute unrelated tables or compatibility views. Missing or ambiguous mapping evidence becomes a blocking finding.
+The workflow does not substitute unrelated tables or compatibility views. Missing or ambiguous mapping evidence becomes a blocking finding. A row without `datasource` that matches datasources reading different extracts (every extract built outside Tableau names its table `Extract`) stops the run before grouping; give each datasource its own row.
+
+The grouping review shows where each datasource's data comes from: a Tableau extract of its original source, an extract that is itself the source (built outside Tableau), or a live connection, and whether the upload includes the extract.
 
 ### Workbooks, packages, and extracts
 

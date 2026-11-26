@@ -12,6 +12,8 @@ from .table_mapping import load_table_mapping  # noqa: F401  (re-exported)
 
 from . import __version__
 from .source_systems import source_system_of
+from .sources.tableau.extract_origin import EXTRACT_CLASSES, extract_origin, relation_connections, source_identity
+from .table_mapping import TableMappingError
 from .artifacts import write_json_artifact
 
 
@@ -105,26 +107,91 @@ def _mapping_targets(mapping: dict[str, Any], datasource_ir: dict[str, Any]) -> 
     return selected, targets
 
 
+def _mapped_extract_sources(entry: dict[str, Any], datasource_ir: dict[str, Any]) -> set[str]:
+    """Extract files behind the datasource's tables that a mapping row matches.
+
+    Only tables read from an extract count: every extract built outside Tableau names its table
+    Extract, so a shared name says nothing about shared data. Other tables sharing a name (an Excel
+    and a CSV copy of Orders) are a deliberate mapping choice.
+    """
+    table = _relation_name(entry.get("source", {}).get("table"))
+    return {
+        source_identity(connection, relation.get("table") or relation.get("name"))
+        for relation, connection in relation_connections(datasource_ir)
+        if connection
+        and str(connection.get("class") or "").casefold() in EXTRACT_CLASSES
+        and table in {_relation_name(relation.get("name")), _relation_name(relation.get("table"))}
+    }
+
+
+def _check_unambiguous_mapping(mapping: dict[str, Any], matches: dict[int, list[tuple[str, set[str]]]]) -> None:
+    """Stop when one row without a datasource maps different extracts to one target.
+
+    Datasources reading the same extract may share a row; datasources whose extracts merely share a
+    table name (every Alteryx output is called Extract) must each get their own row.
+    """
+    problems = []
+    for index, matched in sorted(matches.items()):
+        entry = mapping["table_mappings"][index]
+        if entry.get("source", {}).get("datasource") or len(matched) < 2:
+            continue
+        if len(set().union(*(sources for _, sources in matched))) < 2:
+            continue
+        names = ", ".join(sorted(name for name, _ in matched))
+        problems.append(
+            f"source table '{entry['source']['table']}' -> {entry['target']['table']} matches datasources that read "
+            f"different extracts: {names}. Give each its own row with a datasource, for example "
+            f"{{source: {{table: {entry['source']['table']}, datasource: <datasource name>}}, target: {{table: <its table>}}}}."
+        )
+    if problems:
+        raise TableMappingError("Ambiguous table mapping: " + " | ".join(problems))
+
+
+def _extract_files(inventory: dict[str, Any] | None, datasource_ir: dict[str, Any]) -> list[str]:
+    for asset in (inventory or {}).get("assets", []):
+        if asset.get("source_path") != datasource_ir.get("source_path"):
+            continue
+        for document in asset.get("tds_documents", []):
+            if document.get("document_path", asset.get("relative_path")) == datasource_ir.get("document_path"):
+                return list(document.get("extracts") or [])
+        # Older inventories did not link extracts to documents: any extract in the package counts.
+        return [item["relative_path"] for item in asset.get("embedded_extracts", [])]
+    return []
+
+
 def _semantic_assets(
     *,
     datasource_ir_index: dict[str, Any],
     metric_ir_index: dict[str, Any],
     mapping: dict[str, Any],
+    inventory: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     datasource_entries = {item["datasource_id"]: item for item in datasource_ir_index["datasources"]}
     metric_entries = {item["datasource_id"]: item for item in metric_ir_index["datasources"]}
     semantic_assets = []
+    row_matches: dict[int, list[tuple[str, set[str]]]] = {}
+    row_index = {id(entry): index for index, entry in enumerate(mapping["table_mappings"])}
     for datasource_id in sorted(datasource_entries):
         datasource_entry = datasource_entries[datasource_id]
         metric_entry = metric_entries[datasource_id]
         datasource_ir = json.loads(Path(datasource_entry["output_path"]).read_text(encoding="utf-8"))
         metric_ir = json.loads(Path(metric_entry["output_path"]).read_text(encoding="utf-8"))
         selected_mapping, targets = _mapping_targets(mapping, datasource_ir)
+        for entry in selected_mapping:
+            row_matches.setdefault(row_index[id(entry)], []).append(
+                (str(datasource_ir["datasource_name"]), _mapped_extract_sources(entry, datasource_ir))
+            )
+        origin = (
+            extract_origin(datasource_ir, _extract_files(inventory, datasource_ir))
+            if source_system_of(datasource_ir) == "tableau"
+            else None
+        )
         semantic_assets.append(
             {
                 "datasource_id": datasource_id,
                 "datasource_name": datasource_ir["datasource_name"],
                 "source_system": source_system_of(datasource_ir),
+                "extract_origin": origin,
                 "source_path": datasource_ir["source_path"],
                 "document_path": datasource_ir["document_path"],
                 "datasource_ir_path": datasource_entry["output_path"],
@@ -167,6 +234,7 @@ def _semantic_assets(
                 ),
             }
         )
+    _check_unambiguous_mapping(mapping, row_matches)
     return semantic_assets
 
 
@@ -201,6 +269,7 @@ def build_grouping_request(
         datasource_ir_index=datasource_ir_index,
         metric_ir_index=metric_ir_index,
         mapping=mapping,
+        inventory=inventory,
     )
     return {
         "schema_version": "1.0",
@@ -214,6 +283,7 @@ def build_grouping_request(
                 for key in (
                     "datasource_id",
                     "datasource_name",
+                    "extract_origin",
                     "source_path",
                     "document_path",
                     "datasource_ir_path",
@@ -347,6 +417,7 @@ def build_semantic_groups(
         datasource_ir_index=datasource_ir_index,
         metric_ir_index=metric_ir_index,
         mapping=mapping,
+        inventory=inventory,
     )
     proposal = _load_grouping_proposal(grouping_proposal_path)
     proposed_groups = _validate_grouping_proposal(proposal, semantic_assets)
@@ -439,6 +510,7 @@ def build_semantic_groups(
                     "datasource_id": asset["datasource_id"],
                     "datasource_name": asset["datasource_name"],
                     "source_path": asset["source_path"],
+                    "extract_origin": asset["extract_origin"],
                     "relation_count": len(asset["features"]["relations"]),
                     "calculation_count": len(asset["features"]["calculations"]),
                     "field_count": len(asset["features"]["fields"]),
@@ -450,6 +522,7 @@ def build_semantic_groups(
                     "datasource_id": asset["datasource_id"],
                     "datasource_name": asset["datasource_name"],
                     "source_path": asset["source_path"],
+                    "extract_origin": asset["extract_origin"],
                 }
                 for asset in helper_assets
             ],

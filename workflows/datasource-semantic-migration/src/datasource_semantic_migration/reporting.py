@@ -60,14 +60,14 @@ def render_grouping_review_html(review: dict[str, Any]) -> str:
     for group in review["groups"]:
         datasource_rows = "".join(
             f"<tr><td>{escape(item['name'])}</td><td>{escape(item['file'])}</td>"
-            f"<td>{escape(item['role'])}</td></tr>"
+            f"<td>{escape(item.get('data', '—'))}</td><td>{escape(item['role'])}</td></tr>"
             for item in group["datasources"]
-        ) or "<tr><td colspan='3'>No datasources recorded.</td></tr>"
+        ) or "<tr><td colspan='4'>No datasources recorded.</td></tr>"
         target_rows = "".join(f"<li><code>{escape(table)}</code></li>" for table in group["target_tables"])
         sections.append(
             f"<section><div class='section-head'><div><p class='eyebrow'>Group {group['group_index'] + 1}</p>"
             f"<h2>{escape(group['group_name'])}</h2></div><span class='badge'>{escape(group['status'])}</span></div>"
-            "<h3>Datasource membership</h3><table><thead><tr><th>Datasource</th><th>File</th><th>Role</th>"
+            "<h3>Datasource membership</h3><table><thead><tr><th>Datasource</th><th>File</th><th>Data</th><th>Role</th>"
             f"</tr></thead><tbody>{datasource_rows}</tbody></table><h3>Approved target tables</h3>"
             f"<ul>{target_rows or '<li>No approved targets.</li>'}</ul>"
             f"<p><strong>Candidate:</strong> <code>{escape(group['candidate_metric_view'])}</code></p></section>"

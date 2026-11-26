@@ -71,6 +71,7 @@ def summarize_semantic_groups(groups_index: dict[str, Any]) -> list[dict[str, An
                         "name": datasource["datasource_name"],
                         "file": Path(datasource["source_path"]).name,
                         "role": "PRIMARY",
+                        "data": (datasource.get("extract_origin") or {}).get("label", "—"),
                     }
                     for datasource in source_summary.get("datasources", [])
                 ]
@@ -79,6 +80,7 @@ def summarize_semantic_groups(groups_index: dict[str, Any]) -> list[dict[str, An
                         "name": datasource["datasource_name"],
                         "file": Path(datasource["source_path"]).name,
                         "role": "SUPPORTING",
+                        "data": (datasource.get("extract_origin") or {}).get("label", "—"),
                     }
                     for datasource in source_summary.get("supporting_datasources", [])
                 ],
