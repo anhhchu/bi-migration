@@ -89,3 +89,25 @@ def test_measure_references_total_row_level_calculations_once(translator):
     assert translator.measure_reference(field) == ("AVG(`Amount`)", "AVG")
     with pytest.raises(Untranslatable, match="LOD"):
         translator.measure_reference(_measure("x", "LOD_FIXED"))
+
+
+def test_formulas_name_fields_by_id_even_when_a_calculation_has_the_same_caption():
+    # Real Superstore pattern: a calculation captioned "Order Date" shifts the field [Order Date].
+    ir = {
+        "fields": [
+            {"field_id": "[Order Date]", "name": "Order Date", "datatype": "date"},
+            {"field_id": "[Ship Date]", "name": "Ship Date", "datatype": "date"},
+        ],
+        "calculations": [
+            {"calculation_id": "[Calculation_9]", "name": "Order Date", "datatype": "date", "formula": "[Order Date]+365+365+365+365"},
+            {"calculation_id": "[Calculation_7]", "name": "Days to Ship", "datatype": "integer", "formula": "[Ship Date]-[Order Date]"},
+            {"calculation_id": "[Calculation_5]", "name": "In Window", "formula": "[Calculation_9] >= #2021-10-01#"},
+        ],
+        "parameters": [],
+    }
+    translator = FormulaTranslator(ir, ["Order Date", "Ship Date"])
+
+    # Days to Ship reads the field, not the shifted calculation.
+    assert translator.translate("[Calculation_7]") == "(CAST(DATEDIFF(DAY, `Order Date`, `Ship Date`) AS INT))"
+    # The shift is applied once.
+    assert translator.translate("[Calculation_9]") == "(`Order Date` + 365 + 365 + 365 + 365)"

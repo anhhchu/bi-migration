@@ -157,16 +157,18 @@ class FormulaTranslator:
 
     def __init__(self, datasource_ir: dict[str, Any], extract_columns: list[str]):
         self.extract_by_key = {_key(name): name for name in extract_columns}
-        self.fields: dict[str, dict[str, Any]] = {}
+        # Tableau formulas name fields and calculations by internal ID; captions are only a fallback, because a
+        # calculation may carry a field's caption (a calculation captioned Order Date that shifts [Order Date]).
+        self.fields_by_id = {str(f.get("field_id")).casefold(): f for f in datasource_ir.get("fields", []) if f.get("field_id")}
+        self.calculations_by_id = {
+            str(c.get("calculation_id")).casefold(): c for c in datasource_ir.get("calculations", []) if c.get("calculation_id")
+        }
+        self.fields_by_caption: dict[str, dict[str, Any]] = {}
         for field in datasource_ir.get("fields", []):
-            for key in (field.get("field_id"), f"[{field.get('name')}]"):
-                if key:
-                    self.fields.setdefault(key.casefold(), field)
-        self.calculations: dict[str, dict[str, Any]] = {}
+            self.fields_by_caption.setdefault(f"[{field.get('name')}]".casefold(), field)
+        self.calculations_by_caption: dict[str, dict[str, Any]] = {}
         for calculation in datasource_ir.get("calculations", []):
-            for key in (calculation.get("calculation_id"), f"[{calculation.get('name')}]"):
-                if key:
-                    self.calculations.setdefault(key.casefold(), calculation)
+            self.calculations_by_caption.setdefault(f"[{calculation.get('name')}]".casefold(), calculation)
         self.parameters = {
             str(item.get("parameter_id", "")).casefold(): item for item in datasource_ir.get("parameters", [])
         }
@@ -189,25 +191,42 @@ class FormulaTranslator:
             raise Untranslatable(f"unexpected {tokens[position][1]!r}")
         return sql
 
-    def _reference_kind(self, name: str, seen: frozenset[str]) -> str | None:
+    def _resolve(self, name: str, seen: frozenset[str]) -> tuple[str, dict[str, Any]] | None:
+        """("calculation" | "field", definition) for a formula reference: IDs first, then captions.
+
+        Inside a calculation's own formula, its ID means the field it replaces (a calculation whose ID is
+        [Order Date] and whose formula shifts [Order Date]).
+        """
         key = name.casefold()
-        item = self.fields.get(key) if (key in seen or key not in self.calculations) else self.calculations[key]
-        return "date" if str((item or {}).get("datatype") or "").casefold() in DATE_TYPES else None
+        for kind, table in (
+            ("calculation", self.calculations_by_id),
+            ("field", self.fields_by_id),
+            ("calculation", self.calculations_by_caption),
+            ("field", self.fields_by_caption),
+        ):
+            item = table.get(key)
+            if item is None:
+                continue
+            if kind == "calculation" and str(item.get("calculation_id", "")).casefold() in seen:
+                continue
+            return kind, item
+        return None
+
+    def _reference_kind(self, name: str, seen: frozenset[str]) -> str | None:
+        resolved = self._resolve(name, seen)
+        return "date" if resolved and str(resolved[1].get("datatype") or "").casefold() in DATE_TYPES else None
 
     def _reference(self, name: str, *, depth: int, seen: frozenset[str]) -> str:
-        key = name.casefold()
-        # A calculation may replace a field of the same name (for example a date shift on Order Date);
-        # inside its own formula the name means the underlying field.
-        if key in seen and key in self.fields:
-            return self.field_column(self.fields[key])
-        if key in self.calculations:
-            if key in seen:
+        resolved = self._resolve(name, seen)
+        if resolved is None:
+            if any(str(item.get("calculation_id", "")).casefold() in seen for item in [self.calculations_by_id.get(name.casefold()) or {}]):
                 raise Untranslatable(f"calculation {name} refers to itself")
-            calculation = self.calculations[key]
-            return "(" + self.translate(str(calculation.get("formula") or ""), depth=depth + 1, seen=seen | {key}) + ")"
-        if key in self.fields:
-            return self.field_column(self.fields[key])
-        raise Untranslatable(f"unknown field {name}")
+            raise Untranslatable(f"unknown field {name}")
+        kind, item = resolved
+        if kind == "field":
+            return self.field_column(item)
+        calculation_id = str(item.get("calculation_id", "")).casefold()
+        return "(" + self.translate(str(item.get("formula") or ""), depth=depth + 1, seen=seen | {calculation_id}) + ")"
 
     def _parameter(self, name: str) -> str:
         parameter = self.parameters.get(name.casefold())
@@ -340,7 +359,7 @@ class FormulaTranslator:
         if expression.get("kind") == "field_aggregate":
             if aggregation == "ROW_COUNT":
                 return "COUNT(*)", "ROW_COUNT"
-            field = self.fields.get(str(expression.get("field_id") or "").casefold())
+            field = self.fields_by_id.get(str(expression.get("field_id") or "").casefold())
             if field is None:
                 raise Untranslatable("field definition not found")
             column = self.field_column(field)
