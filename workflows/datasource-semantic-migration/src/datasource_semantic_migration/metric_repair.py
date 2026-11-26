@@ -44,8 +44,20 @@ SATISFYING_FAMILIES = {
     "VARIANCE": {"VARIANCE"},
     "PERCENTILE": {"PERCENTILE", "MEDIAN"},
 }
-# Totals written with higher-order functions (often to avoid double counting across joins) cannot be read.
-UNREADABLE_AGGREGATION_PATTERN = re.compile(r"\b(AGGREGATE|REDUCE|COLLECT_SET|COLLECT_LIST|ARRAY_AGG)\s*\(", re.IGNORECASE)
+# Totals written with higher-order functions (often to avoid double counting across joins), and window
+# measures, cannot be read.
+UNREADABLE_AGGREGATION_PATTERN = re.compile(
+    r"\b(AGGREGATE|REDUCE|COLLECT_SET|COLLECT_LIST|ARRAY_AGG)\s*\(|\)\s*OVER\s*\(", re.IGNORECASE
+)
+# SQL aggregates the check does not map to a family: their presence means the check cannot judge the
+# expression, so it is skipped rather than flagged (for example try_sum, ANY_VALUE, MAX_BY).
+UNMAPPED_AGGREGATE_FUNCTIONS = {
+    "ANY", "ANY_VALUE", "APPROX_COUNT_DISTINCT", "APPROX_PERCENTILE", "APPROX_TOP_K", "BIT_AND", "BIT_OR",
+    "BIT_XOR", "BOOL_AND", "BOOL_OR", "CORR", "COUNT_MIN_SKETCH", "COVAR_POP", "COVAR_SAMP", "EVERY", "FIRST",
+    "FIRST_VALUE", "KURTOSIS", "LAST", "LAST_VALUE", "LISTAGG", "MAX_BY", "MIN_BY", "MODE", "SKEWNESS", "SOME",
+    "STRING_AGG", "TRY_AVG", "TRY_SUM",
+}
+UNMAPPED_AGGREGATE_PREFIXES = ("HLL_", "REGR_")
 TARGET_FUNCTION_PATTERN = re.compile(r"\b([A-Za-z_]+)\s*\(\s*(DISTINCT\b)?", re.IGNORECASE)
 TARGET_FUNCTION_FAMILIES = {
     "SUM": "SUM", "AVG": "AVG", "MEAN": "AVG", "COUNT": "COUNT", "COUNT_IF": "COUNT_IF", "MIN": "MIN",
@@ -143,10 +155,13 @@ def _target_families(expression: str) -> set[str] | None:
     families = set()
     for match in TARGET_FUNCTION_PATTERN.finditer(expression):
         name = match.group(1).upper()
-        if name == "MEASURE":
+        if name == "MEASURE" or name in UNMAPPED_AGGREGATE_FUNCTIONS or name.startswith(UNMAPPED_AGGREGATE_PREFIXES):
             return None
         if name == "COUNT" and match.group(2):
             families.add("COUNT_DISTINCT")
+        elif name in {"SUM", "AVG", "MEAN"} and match.group(2):
+            # SUM(DISTINCT x) adds each value once; it is not the source's SUM or AVG.
+            families.add(f"{TARGET_FUNCTION_FAMILIES[name]}_DISTINCT")
         elif name.startswith("PERCENTILE"):
             families.add("PERCENTILE")
         elif name.startswith("STDDEV"):
@@ -169,14 +184,15 @@ def _aggregation_difference(source: dict[str, Any], target_expression: str) -> d
         return {"field": "aggregation", "source": "SOURCE_DEFAULT", "target": target_expression, "suggested": suggestion}
     expected = _expected_families(source)
     found = _target_families(target_expression)
-    if not expected or found is None:
+    # Judge only expressions whose aggregates are all recognized; anything else is left to the query check.
+    if not expected or not found:
         return None
     missing = sorted(family for family in expected if not (SATISFYING_FAMILIES.get(family, {family}) & found))
     if not missing:
         return None
     suggestion = None
     single = SINGLE_AGGREGATE_PATTERN.match(target_expression)
-    if single and missing[0] != "ROW_COUNT":
+    if single and missing[0] != "ROW_COUNT" and _target_families(f"{single.group(1)}(x)"):
         suggestion = _family_sql(missing[0], single.group(3))
     return {"field": "aggregation", "source": ", ".join(missing), "target": target_expression, "suggested": suggestion}
 

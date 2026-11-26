@@ -426,3 +426,31 @@ def test_query_results_match_names_with_repeated_spaces():
     )
 
     assert evaluation["scorecards"][0]["status"] == "PASS_SEMANTIC_ONLY"
+
+
+
+@pytest.mark.parametrize(
+    "target_expression",
+    [
+        "try_sum(amount)",
+        "try_avg(price)",
+        "ANY_VALUE(total)",
+        "MAX_BY(price, order_date)",
+        "APPROX_COUNT_DISTINCT(id)",
+        "SUM(amount) OVER (PARTITION BY region)",
+        "CASE WHEN flag THEN amount END",
+        "try_sum(amount) + COUNT(id)",
+    ],
+)
+def test_unrecognized_aggregates_are_skipped_not_flagged(target_expression):
+    evaluation = _evaluate([field_measure("Metric", "SUM")], [{"name": "Metric", "expr": target_expression}])
+
+    assert evaluation["scorecards"][0]["status"] == "PASS_SEMANTIC_ONLY"
+
+
+def test_sum_distinct_is_not_a_sum():
+    evaluation = _evaluate([field_measure("Amount", "SUM")], [{"name": "Amount", "expr": "SUM(DISTINCT amount)"}])
+
+    scorecard = evaluation["scorecards"][0]
+    assert scorecard["failure_codes"] == ["AGGREGATION_MISMATCH"]
+    assert build_deterministic_patch(evaluation, {"measures": []})["operations"][0]["after"] == "SUM(amount)"
