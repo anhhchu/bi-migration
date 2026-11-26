@@ -154,3 +154,23 @@ def test_the_first_definition_of_a_measure_is_used():
         reference_for=lambda source: (f"SUM(x{source['_definition']})", "SUM"),
     )
     assert plans[0]["reference_sql"] == "SUM(x0)"
+
+
+def test_spark_decimals_and_dates_are_stored_as_json(tmp_path):
+    import datetime
+    import json
+    from decimal import Decimal
+
+    from datasource_semantic_migration.artifacts import write_json_artifact
+
+    plans = [{"measure": "Sales", "comparable": True, "family": "SUM"}]
+    results = compare_results(
+        plans,
+        [{"g": datetime.date(2024, 1, 1), "m0": Decimal("2297200.8603")}],
+        [{"g": datetime.date(2024, 1, 1), "m0": Decimal("2297200.8603")}],
+        grouped_by="Order Date",
+    )
+    assert results["Sales"]["values"] == [{"group": "2024-01-01", "candidate": 2297200.8603, "reference": 2297200.8603}]
+
+    path = write_json_artifact({"total": Decimal("12420"), "when": datetime.date(2024, 1, 1), "results": results}, tmp_path / "x.json")
+    assert json.loads(path.read_text())["total"] == 12420

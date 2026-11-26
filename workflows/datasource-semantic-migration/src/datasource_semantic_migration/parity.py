@@ -372,6 +372,16 @@ def values_match(candidate: Any, reference: Any, family: str) -> tuple[bool, boo
     return close, False
 
 
+def _plain(value: Any) -> Any:
+    """A JSON-safe copy of a query value: Spark returns Decimal for decimal columns, and dates."""
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    number = _number(value)
+    if number is not None and not isinstance(value, (bytes, bytearray)):
+        return int(number) if number.is_integer() and abs(number) < 2**53 else number
+    return value.isoformat() if hasattr(value, "isoformat") else str(value)
+
+
 def _key(value: Any) -> str:
     return "∅" if value is None else str(value)
 
@@ -400,7 +410,7 @@ def compare_results(
             reference_value = reference_by_group.get(group, {}).get(column)
             matches, is_exact = values_match(candidate_value, reference_value, plan["family"])
             exact = exact and is_exact
-            pair = {"group": group, "candidate": candidate_value, "reference": reference_value}
+            pair = {"group": group, "candidate": _plain(candidate_value), "reference": _plain(reference_value)}
             values.append(pair)
             if not matches:
                 differences.append(pair)
