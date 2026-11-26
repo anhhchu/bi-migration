@@ -114,3 +114,43 @@ def test_extract_columns_get_unique_delta_safe_names():
         "2024 Target": "c_2024_target",
         "Profit (bin)": "profit_bin",
     }
+
+
+def test_candidate_computed_columns_are_recomputed_from_the_extract():
+    from datasource_semantic_migration.parity import derived_columns
+
+    source = (
+        "SELECT s.business_valid_from AS order_date, s.fulfilled_date AS ship_date, s.mode AS ship_mode, "
+        "DATE_ADD(s.business_valid_from, 1460) AS order_date_shifted, DATEDIFF(s.fulfilled_date, s.business_valid_from) AS days, "
+        "CASE s.mode WHEN 'Same Day' THEN 0 ELSE 1 END AS scheduled, COUNT(1) OVER () AS total_records, "
+        "s.net_cents / 100.0 AS sales_raw FROM orders s LEFT JOIN (SELECT * FROM c) c ON s.id = c.id"
+    )
+    bound = {"order_date": "order_date", "ship_date": "ship_date", "ship_mode": "ship_mode"}
+
+    derived = derived_columns(source, bound)
+
+    assert derived == {
+        "order_date_shifted": "DATE_ADD(`order_date`, 1460)",
+        "days": "DATEDIFF(`ship_date`, `order_date`)",
+        "scheduled": "CASE `ship_mode` WHEN 'Same Day' THEN 0 ELSE 1 END",
+        "total_records": "COUNT(1) OVER ()",
+    }
+
+
+def test_both_sides_empty_is_not_a_match():
+    plans = [{"measure": "Sales", "comparable": True, "family": "SUM"}]
+    results = compare_results(plans, [{"m0": None}], [{"m0": None}], grouped_by=None)
+
+    assert results["Sales"]["status"] == "EMPTY" and results["Sales"]["values"] == [{"group": "total", "candidate": None, "reference": None}]
+    assert measure_outcomes(plans, [results])[0]["status"] == "NOT_COMPARABLE"
+
+
+def test_the_first_definition_of_a_measure_is_used():
+    binding = bind_columns(OUTPUTS, EXTRACT, metric_view=METRIC_VIEW)
+    sources = [{"display_name": "Sales", "_definition": 0}, {"display_name": "Sales", "_definition": 1}]
+    plans = plan_measures(
+        metric_view={"measures": [{"name": "Sales", "expr": "SUM(sales)"}]},
+        source_measures=sources, output_columns=OUTPUTS, binding=binding,
+        reference_for=lambda source: (f"SUM(x{source['_definition']})", "SUM"),
+    )
+    assert plans[0]["reference_sql"] == "SUM(x0)"

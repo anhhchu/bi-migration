@@ -6,21 +6,23 @@ IR = {
     "fields": [
         {"field_id": "[Amount]", "name": "Amount", "remote_name": "Amount"},
         {"field_id": "[Metric Type]", "name": "Metric Type", "remote_name": "Metric Type"},
-        {"field_id": "[Order Date]", "name": "Order Date", "remote_name": "Order Date"},
+        {"field_id": "[Order Date]", "name": "Order Date", "remote_name": "Order Date", "datatype": "date"},
+        {"field_id": "[Ship Date]", "name": "Ship Date", "remote_name": "Ship Date", "datatype": "date"},
         {"field_id": "[Customer]", "name": "Customer", "remote_name": "Customer Name"},
     ],
     "calculations": [
         {"calculation_id": "[Calculation_1]", "name": "Actual", "formula": "if [Metric Type]='Actual' THEN [Amount] END"},
         {"calculation_id": "[Calculation_2]", "name": "Budget", "formula": "IF [Metric Type]=\"Budget\" THEN [Amount] END"},
         {"calculation_id": "[Calculation_3]", "name": "Gap", "formula": "SUM([Calculation_1]) - SUM([Calculation_2])"},
-        {"calculation_id": "[Order Date]", "name": "Order Date", "formula": "DATEADD('year', 4, [Order Date])"},
+        {"calculation_id": "[Order Date]", "name": "Order Date", "datatype": "date", "formula": "DATEADD('year', 4, [Order Date])"},
     ],
     "parameters": [
         {"parameter_id": "[Parameter 1]", "name": "Unit", "default_value": '"Software"'},
         {"parameter_id": "[Parameter 2]", "name": "Year", "default_value": "2024"},
+        {"parameter_id": "[Parameter 4]", "name": "Minimum Date", "datatype": "date", "default_value": "#2021-10-01#"},
     ],
 }
-COLUMNS = ["Amount", "Metric Type", "Order Date", "Customer Name"]
+COLUMNS = ["Amount", "Metric Type", "Order Date", "Ship Date", "Customer Name"]
 
 
 @pytest.fixture
@@ -38,7 +40,14 @@ def translator():
         ("[Metric Type] == 'Actual' AND [Amount] >= 10", "`Metric Type` = 'Actual' AND `Amount` >= 10"),
         ("[Parameters].[Parameter 1] = 'x'", "'Software' = 'x'"),
         # [Order Date] is replaced by a calculation of the same name, so it means the shifted date, as in Tableau.
-        ("DATEDIFF('day', [Order Date], TODAY())", "DATEDIFF(DAY, (DATEADD(YEAR, 4, `Order Date`)), CURRENT_DATE())"),
+        ("DATEDIFF('day', [Order Date], TODAY())", "CAST(DATEDIFF(DAY, (DATEADD(YEAR, 4, `Order Date`)), CURRENT_DATE()) AS INT)"),
+        # Tableau's date - date is a number of days; Databricks would return an interval.
+        ("[Ship Date] - [Order Date]", "CAST(DATEDIFF(DAY, (DATEADD(YEAR, 4, `Order Date`)), `Ship Date`) AS INT)"),
+        # date - number stays date arithmetic, with DATEDIFF cast to INT for it.
+        (
+            "[Parameters].[Parameter 4] - (DATEDIFF('day', [Ship Date], [Ship Date]) + 1)",
+            "TO_DATE('2021-10-01') - (CAST(DATEDIFF(DAY, `Ship Date`, `Ship Date`) AS INT) + 1)",
+        ),
         ("MAX([Amount], 0)", "GREATEST(`Amount`, 0)"),
         ("// a comment\nSUM([Amount])", "SUM(`Amount`)"),
     ],

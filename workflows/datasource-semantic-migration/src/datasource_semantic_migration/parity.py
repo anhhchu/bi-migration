@@ -73,6 +73,100 @@ def source_lineage(source_sql: str) -> dict[str, str]:
     }
 
 
+SQL_WORDS = {
+    "case", "when", "then", "else", "end", "and", "or", "not", "null", "true", "false", "is", "in", "as", "over",
+    "partition", "by", "order", "asc", "desc", "between", "like", "distinct", "interval", "day", "month", "year",
+    "date", "timestamp", "cast", "rows", "range", "unbounded", "preceding", "following", "current", "row",
+    "string", "int", "bigint", "double", "decimal", "boolean", "filter", "where",
+}
+
+
+def _split_top_level(text: str, separator: str = ",") -> list[str]:
+    """Split on a separator outside parentheses and quotes."""
+    items, depth, quote_character, start = [], 0, None, 0
+    for index, character in enumerate(text):
+        if quote_character:
+            if character == quote_character:
+                quote_character = None
+        elif character in "'`\"":
+            quote_character = character
+        elif character == "(":
+            depth += 1
+        elif character == ")":
+            depth -= 1
+        elif character == separator and depth == 0:
+            items.append(text[start:index])
+            start = index + 1
+    items.append(text[start:])
+    return [item.strip() for item in items if item.strip()]
+
+
+def _select_list(source_sql: str) -> list[str]:
+    """Items of the outermost SELECT list, or [] when the source is not a plain SELECT."""
+    match = re.match(r"\s*SELECT\s+(?:DISTINCT\s+)?", source_sql or "", flags=re.IGNORECASE)
+    if not match:
+        return []
+    text, depth, quote_character = source_sql[match.end():], 0, None
+    for index, character in enumerate(text):
+        if quote_character:
+            if character == quote_character:
+                quote_character = None
+        elif character in "'`\"":
+            quote_character = character
+        elif character == "(":
+            depth += 1
+        elif character == ")":
+            depth -= 1
+        elif depth == 0 and re.match(r"\bFROM\b", text[index:index + 5], flags=re.IGNORECASE) and (
+            index == 0 or not (text[index - 1].isalnum() or text[index - 1] == "_")
+        ):
+            return _split_top_level(text[:index])
+    return []
+
+
+def derived_columns(source_sql: str, bound: dict[str, str]) -> dict[str, str]:
+    """Output columns the candidate computes in its source, rewritten to read the extract.
+
+    An item such as DATE_ADD(s.business_valid_from, 1460) AS order_date_shifted is kept when every
+    column it reads feeds a bound output column (s.business_valid_from feeds order_date, which the
+    extract has). Its columns are replaced by the extract columns; otherwise it stays unbound.
+    """
+    lineage = source_lineage(source_sql)
+    raw_to_extract = {raw: bound[output] for output, raw in lineage.items() if output in bound}
+    raw_to_extract.update({column_key(output): extract for output, extract in bound.items()})
+    derived = {}
+    for item in _select_list(source_sql):
+        alias_match = re.search(r"\s+AS\s+(`[^`]+`|[A-Za-z_]\w*)\s*$", item, flags=re.IGNORECASE)
+        if not alias_match:
+            continue
+        output = _unquote(alias_match.group(1))
+        expression = item[: alias_match.start()].strip()
+        if output in bound or re.fullmatch(r"(?:\w+\.)?`?\w+`?", expression):
+            continue
+        unresolved = False
+
+        def replace(match: re.Match) -> str:
+            nonlocal unresolved
+            name = _unquote(match.group(2))
+            key = column_key(name)
+            if match.group(1) is None and (key in SQL_WORDS or match.string[match.end():].lstrip().startswith("(")):
+                return match.group(0)
+            if key in raw_to_extract:
+                return quote(raw_to_extract[key])
+            unresolved = True
+            return match.group(0)
+
+        # Leave string literals alone; rewrite [alias.]column references.
+        pieces = re.split(r"('(?:[^'\\]|\\.)*')", expression)
+        rewritten = "".join(
+            piece if index % 2 else re.sub(r"(?<![\w`.])(`?[A-Za-z_]\w*`?\.)?(`[^`]+`|[A-Za-z_]\w*)(?![\w`])", replace, piece)
+            for index, piece in enumerate(pieces)
+        )
+        if not unresolved:
+            derived[output] = rewritten
+    return derived
+
+
 def _bare_column(expression: str) -> str | None:
     match = re.fullmatch(r"\s*(?:source\.)?(`[^`]+`|[A-Za-z_]\w*)\s*", expression or "", flags=re.IGNORECASE)
     return _unquote(match.group(1)) if match else None
@@ -111,22 +205,31 @@ def bind_columns(
             bound[name], how[name] = extract_by_key[key], "same name"
         elif key in by_item_name:
             bound[name], how[name] = by_item_name[key], "named item"
+    derived = {
+        name: expression
+        for name, expression in derived_columns(str(metric_view.get("source") or ""), bound).items()
+        if name in {output for output, _ in output_columns}
+    }
     return {
         "bound": bound,
         "how": how,
-        "unbound": [name for name, _ in output_columns if name not in bound],
+        "derived": derived,
+        "unbound": [name for name, _ in output_columns if name not in bound and name not in derived],
     }
 
 
 def shadow_source_sql(extract_table: str, output_columns: list[tuple[str, str]], binding: dict[str, Any]) -> str:
     """The candidate's source replaced by the extract: same output columns, extract data.
 
-    Unbound columns are typed NULLs so the shadow view still compiles; measures using them are
-    reported as not comparable rather than compared.
+    Derived columns run the candidate's own expression on extract columns. Unbound columns are typed
+    NULLs so the shadow view still compiles; measures using them are reported as not comparable.
     """
+    derived = binding.get("derived", {})
     items = [
         f"{quote(binding['bound'][name])} AS {quote(name)}"
         if name in binding["bound"]
+        else f"CAST(({derived[name]}) AS {data_type}) AS {quote(name)}"
+        if name in derived
         else f"CAST(NULL AS {data_type}) AS {quote(name)}"
         for name, data_type in output_columns
     ]
@@ -165,7 +268,10 @@ def plan_measures(
     family); the source system supplies it and raises ValueError, with the reason, when it cannot.
     """
     output_names = [name for name, _ in output_columns]
-    sources = {normalized_name(item.get("display_name")): item for item in source_measures}
+    # The first definition of a name wins, so callers list the preferred datasource first.
+    sources: dict[str, dict[str, Any]] = {}
+    for item in source_measures:
+        sources.setdefault(normalized_name(item.get("display_name")), item)
     unbound = set(binding["unbound"])
     plans = []
     for measure in metric_view.get("measures", []):
@@ -288,18 +394,23 @@ def compare_results(
     results = {}
     for index, plan in enumerate(comparable):
         column = f"m{index}"
-        exact, differences = True, []
+        exact, differences, values = True, [], []
         for group in groups:
             candidate_value = candidate_by_group.get(group, {}).get(column)
             reference_value = reference_by_group.get(group, {}).get(column)
             matches, is_exact = values_match(candidate_value, reference_value, plan["family"])
             exact = exact and is_exact
+            pair = {"group": group, "candidate": candidate_value, "reference": reference_value}
+            values.append(pair)
             if not matches:
-                differences.append({"group": group, "candidate": candidate_value, "reference": reference_value})
+                differences.append(pair)
+        # Both sides empty everywhere would "match" without proving anything.
+        all_empty = all(_number(pair["candidate"]) is None and _number(pair["reference"]) is None for pair in values)
         results[plan["measure"]] = {
             "grouped_by": grouped_by,
-            "status": "MISMATCH" if differences else ("EXACT" if exact else "WITHIN_TOLERANCE"),
+            "status": "EMPTY" if all_empty else "MISMATCH" if differences else ("EXACT" if exact else "WITHIN_TOLERANCE"),
             "groups_compared": len(groups),
+            "values": values[:MAXIMUM_GROUP_VALUES],
             "differences": differences[:5],
             "difference_count": len(differences),
         }
@@ -315,6 +426,10 @@ def measure_outcomes(plans: list[dict[str, Any]], comparisons: list[dict[str, di
             outcomes.append({"measure": name, "status": "NOT_COMPARABLE", "reason": plan["reason"], "checks": []})
             continue
         checks = [comparison[name] for comparison in comparisons if name in comparison]
+        if checks and all(check["status"] == "EMPTY" for check in checks):
+            outcomes.append({"measure": name, "status": "NOT_COMPARABLE", "reason": "Both sides returned no values, so nothing was compared.", "checks": checks})
+            continue
+        checks = [check for check in checks if check["status"] != "EMPTY"] or checks
         if not checks:
             outcomes.append({"measure": name, "status": "NOT_COMPARABLE", "reason": "The comparison query did not run.", "checks": []})
         elif any(check["status"] == "MISMATCH" for check in checks):

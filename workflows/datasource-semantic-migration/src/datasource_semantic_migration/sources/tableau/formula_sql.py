@@ -20,6 +20,9 @@ KEYWORDS = {
     "IN": "IN",
 }
 DATE_UNITS = {"year", "quarter", "month", "week", "day", "hour", "minute", "second"}
+DATE_TYPES = {"date", "datetime"}
+# Functions whose result is a date, for Tableau's date - date (a number of days).
+DATE_FUNCTIONS = {"DATE", "DATEADD", "DATETRUNC", "MAKEDATE", "TODAY", "NOW"}
 SQL_AGGREGATE_PATTERN = re.compile(
     r"\b(SUM|AVG|COUNT|MIN|MAX|MEDIAN|STDDEV_SAMP|STDDEV_POP|VAR_SAMP|VAR_POP)\s*\(", re.IGNORECASE
 )
@@ -139,7 +142,8 @@ FUNCTIONS: dict[str, Callable[[list[str]], str]] = {
     "MAKEDATE": _same("MAKE_DATE", range(3, 4)),
     "DATEPART": lambda a: f"DATE_PART('{_unit(_arguments(range(2, 3), 'DATEPART', a)[0])}', {a[1]})",
     "DATETRUNC": lambda a: f"DATE_TRUNC('{_unit(_arguments(range(2, 3), 'DATETRUNC', a)[0])}', {a[1]})",
-    "DATEDIFF": lambda a: f"DATEDIFF({_unit(_arguments(range(3, 4), 'DATEDIFF', a)[0]).upper()}, {a[1]}, {a[2]})",
+    # Databricks returns BIGINT; Tableau date arithmetic such as [Date] - DATEDIFF(...) needs INT.
+    "DATEDIFF": lambda a: f"CAST(DATEDIFF({_unit(_arguments(range(3, 4), 'DATEDIFF', a)[0]).upper()}, {a[1]}, {a[2]}) AS INT)",
     "DATEADD": lambda a: f"DATEADD({_unit(_arguments(range(3, 4), 'DATEADD', a)[0]).upper()}, {a[1]}, {a[2]})",
 }
 
@@ -180,10 +184,15 @@ class FormulaTranslator:
             raise Untranslatable("calculations are nested too deeply")
         # The shared tokenizer returns whitespace as symbols; it carries no meaning here.
         tokens = [(token.type, str(token)) for token in tokenize_formula(formula or "") if str(token).strip()]
-        sql, position = self._sequence(tokens, 0, depth=depth, seen=seen, stop=set())
+        sql, position, _ = self._sequence(tokens, 0, depth=depth, seen=seen, stop=set())
         if position != len(tokens):
             raise Untranslatable(f"unexpected {tokens[position][1]!r}")
         return sql
+
+    def _reference_kind(self, name: str, seen: frozenset[str]) -> str | None:
+        key = name.casefold()
+        item = self.fields.get(key) if (key in seen or key not in self.calculations) else self.calculations[key]
+        return "date" if str((item or {}).get("datatype") or "").casefold() in DATE_TYPES else None
 
     def _reference(self, name: str, *, depth: int, seen: frozenset[str]) -> str:
         key = name.casefold()
@@ -215,9 +224,13 @@ class FormulaTranslator:
 
     def _sequence(
         self, tokens: list[tuple[str, str]], position: int, *, depth: int, seen: frozenset[str], stop: set[str]
-    ) -> tuple[str, int]:
-        """Translate tokens until a top-level stop symbol (',' or ')'); return SQL and the stop position."""
+    ) -> tuple[str, int, str | None]:
+        """Translate tokens until a top-level stop symbol (',' or ')').
+
+        Returns the SQL, the stop position, and "date" when the whole sequence is a single date value.
+        """
         parts: list[str] = []
+        kinds: dict[int, str] = {}
         while position < len(tokens):
             kind, value = tokens[position]
             if kind == "SYMBOL" and value in stop:
@@ -233,9 +246,14 @@ class FormulaTranslator:
                 if is_qualified:
                     if value.casefold() != "[parameters]":
                         raise Untranslatable(f"uses a field from another datasource ({value})")
+                    parameter = self.parameters.get(tokens[position + 2][1].casefold()) or {}
+                    if str(parameter.get("datatype") or "").casefold() in DATE_TYPES:
+                        kinds[len(parts)] = "date"
                     parts.append(self._parameter(tokens[position + 2][1]))
                     position += 3
                     continue
+                if self._reference_kind(value, seen):
+                    kinds[len(parts)] = "date"
                 parts.append(self._reference(value, depth=depth, seen=seen))
             elif kind == "STRING":
                 parts.append(_string_literal(value))
@@ -250,15 +268,19 @@ class FormulaTranslator:
                     if upper not in FUNCTIONS:
                         raise Untranslatable(f"function {upper} is not supported yet")
                     arguments, position = self._arguments(tokens, position + 2, depth=depth, seen=seen)
+                    if upper in DATE_FUNCTIONS:
+                        kinds[len(parts)] = "date"
                     parts.append(FUNCTIONS[upper](arguments))
                     continue
                 if upper not in KEYWORDS:
                     raise Untranslatable(f"unknown word {value}")
                 parts.append(KEYWORDS[upper])
             elif value == "(":
-                inner, position = self._sequence(tokens, position + 1, depth=depth, seen=seen, stop={")"})
+                inner, position, inner_kind = self._sequence(tokens, position + 1, depth=depth, seen=seen, stop={")"})
                 if position >= len(tokens):
                     raise Untranslatable("unbalanced parentheses")
+                if inner_kind:
+                    kinds[len(parts)] = inner_kind
                 parts.append(f"({inner})")
             elif value == "=" and position + 1 < len(tokens) and tokens[position + 1] == ("SYMBOL", "="):
                 parts.append("=")
@@ -274,7 +296,26 @@ class FormulaTranslator:
             else:
                 raise Untranslatable(f"unsupported symbol {value!r}")
             position += 1
-        return " ".join(parts), position
+        return self._date_differences(parts, kinds), position, ("date" if len(parts) == 1 and kinds.get(0) else None)
+
+    @staticmethod
+    def _date_differences(parts: list[str], kinds: dict[int, str]) -> str:
+        """Tableau's date - date is a number of days; in Databricks it is an interval, so use DATEDIFF."""
+        output: list[str] = []
+        index = 0
+        while index < len(parts):
+            if (
+                kinds.get(index) == "date"
+                and index + 2 < len(parts)
+                and parts[index + 1] == "-"
+                and kinds.get(index + 2) == "date"
+            ):
+                output.append(f"CAST(DATEDIFF(DAY, {parts[index + 2]}, {parts[index]}) AS INT)")
+                index += 3
+                continue
+            output.append(parts[index])
+            index += 1
+        return " ".join(output)
 
     def _arguments(
         self, tokens: list[tuple[str, str]], position: int, *, depth: int, seen: frozenset[str]
@@ -284,7 +325,7 @@ class FormulaTranslator:
         if position < len(tokens) and tokens[position] == ("SYMBOL", ")"):
             return arguments, position + 1
         while True:
-            argument, position = self._sequence(tokens, position, depth=depth, seen=seen, stop={",", ")"})
+            argument, position, _ = self._sequence(tokens, position, depth=depth, seen=seen, stop={",", ")"})
             if position >= len(tokens):
                 raise Untranslatable("unbalanced parentheses")
             arguments.append(argument)

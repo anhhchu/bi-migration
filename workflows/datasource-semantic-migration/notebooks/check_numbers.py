@@ -120,14 +120,21 @@ else:
     ]
     binding = bind_columns(output_columns, extract_columns, metric_view=metric_view, column_mappings=column_mappings)
     result["binding"] = binding
-    metric_ir = json.loads(Path(datasource["metric_ir_path"]).read_text(encoding="utf-8"))
-    translator = FormulaTranslator(datasource_ir, extract_columns)
+    # Measures from every datasource in the group, the one with the extract first; each is translated with
+    # its own definition, over this extract's columns (the datasources share the same fields).
+    ordered = [datasource] + [item for item in manifest["datasources"] if item is not datasource]
+    source_measures, translators = [], []
+    for position, item in enumerate(ordered):
+        item_ir = datasource_ir if item is datasource else json.loads(Path(item["datasource_ir_path"]).read_text(encoding="utf-8"))
+        translators.append(FormulaTranslator(item_ir, extract_columns))
+        for measure in json.loads(Path(item["metric_ir_path"]).read_text(encoding="utf-8"))["measures"]:
+            source_measures.append({**measure, "_definition": position})
     plans = plan_measures(
         metric_view=metric_view,
-        source_measures=metric_ir["measures"],
+        source_measures=source_measures,
         output_columns=output_columns,
         binding=binding,
-        reference_for=translator.measure_reference,
+        reference_for=lambda measure: translators[measure["_definition"]].measure_reference(measure),
     )
     try:
         # 4. The shadow Metric View: the candidate with its source replaced by the extract.
