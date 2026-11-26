@@ -13,10 +13,13 @@ import yaml
 from .action_items import entry_names
 
 
-# MEASURE() composes already-aggregated measures, so it satisfies Tableau's aggregation requirement.
+# Any SQL aggregate satisfies a per-row formula's need for one. MEASURE() composes already-aggregated
+# measures; *_AGG covers the rest (ST_UNION_AGG, ARRAY_AGG, ...).
 AGGREGATE_PATTERN = re.compile(
-    r"\b(MEASURE|SUM|AVG|MEAN|COUNT|COUNT_IF|APPROX_COUNT_DISTINCT|MIN|MAX|MEDIAN|MODE|PERCENTILE\w*"
-    r"|STDDEV\w*|VARIANCE|VAR_POP|VAR_SAMP|ANY_VALUE|FIRST|LAST|MIN_BY|MAX_BY|BOOL_AND|BOOL_OR)\s*\(",
+    r"\b(MEASURE|SUM|TRY_SUM|AVG|TRY_AVG|MEAN|COUNT|COUNT_IF|APPROX_COUNT_DISTINCT|APPROX_PERCENTILE|MIN|MAX"
+    r"|MEDIAN|MODE|PERCENTILE\w*|STDDEV\w*|VARIANCE|VAR_POP|VAR_SAMP|ANY_VALUE|FIRST|FIRST_VALUE|LAST|LAST_VALUE"
+    r"|MIN_BY|MAX_BY|BOOL_AND|BOOL_OR|EVERY|SOME|BIT_AND|BIT_OR|BIT_XOR|CORR|COVAR_POP|COVAR_SAMP|KURTOSIS"
+    r"|SKEWNESS|COLLECT_SET|COLLECT_LIST|LISTAGG|STRING_AGG|REGR_\w+|HLL_\w+|\w+_AGG)\s*\(",
     re.IGNORECASE,
 )
 # A bare column reference, the only expression the deterministic patch can wrap in SUM() safely.
@@ -386,7 +389,8 @@ def evaluate_candidate(
         item["status"] == "BLOCKED_UNRESOLVED_MAPPING" for item in blocking
     )
     # A mapping or relationship blocker stops the attempt anyway, so Genie output would be discarded.
-    needs_genie = not blocked_evidence and any(item["repair_route"] == "GENIE_PATCH" for item in blocking)
+    decision = genie_decision(scorecards, blocking, relationship_blockers)
+    needs_genie = decision["use_genie"]
     gates = {
         "overall_metric_translation_coverage": coverage["translation_coverage"]
         >= policy["overall_metric_translation_coverage"],
@@ -418,6 +422,7 @@ def evaluate_candidate(
         "blocking_findings": blocking,
         "relationship_blockers": relationship_blockers,
         "needs_genie": needs_genie,
+        "genie_decision": decision,
         "has_deterministic_repairs": deterministic_repairs,
         "failure_signature": document_hash(signature_basis),
         "excluded_measures": sorted(excluded),
@@ -432,6 +437,85 @@ def import_exclusions(import_result_path: str | Path) -> list[str]:
         return []
     document = json.loads(path.read_text(encoding="utf-8")) or {}
     return [name for entry in document.get("items_not_translated") or [] for name in entry_names(entry)]
+
+
+def _why_genie(scorecard: dict[str, Any]) -> str:
+    codes = set(scorecard.get("failure_codes", []))
+    if "MISSING_TARGET_MEASURE" in codes:
+        return "The Metric View has no measure for it; writing a new definition needs Genie."
+    if "MEASURE_QUERY_FAILED" in codes:
+        error = str((scorecard.get("query") or {}).get("error") or "no error captured").splitlines()[0][:200]
+        return f"Its test query fails ({error}); rewriting the expression needs Genie."
+    if "AGGREGATION_MISMATCH" in codes:
+        difference = next(
+            (item for item in scorecard.get("translation", {}).get("differences", []) if item.get("field") == "aggregation"),
+            {},
+        )
+        expression = difference.get("target") or (scorecard.get("target") or {}).get("expr")
+        if difference.get("source") in (None, "SOURCE_DEFAULT"):
+            return (
+                f"Its formula is calculated per row, but `{expression}` has no aggregate, and it is not a single column "
+                "the code can wrap in SUM() safely."
+            )
+        return (
+            f"The source totals it with {difference['source']}, but `{expression}` uses a different aggregate. The code "
+            "only rewrites one aggregate around one plain column, so Genie decides the correct expression."
+        )
+    return "Its failure has no deterministic fix."
+
+
+def genie_decision(
+    scorecards: list[dict[str, Any]], blocking: list[dict[str, Any]], relationship_blockers: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """Whether to ask Genie for a repair, with the reason for every measure involved."""
+    def item(scorecard: dict[str, Any], why: str) -> dict[str, Any]:
+        return {"measure": scorecard.get("source_name"), "failure_codes": scorecard.get("failure_codes", []), "why": why}
+
+    deterministic = []
+    for scorecard in blocking:
+        if scorecard.get("repair_route") != "DETERMINISTIC_METRIC_PATCH":
+            continue
+        rewrite = next(
+            (entry for entry in scorecard.get("translation", {}).get("differences", []) if entry.get("suggested")), {}
+        )
+        target = rewrite.get("target") or (scorecard.get("target") or {}).get("expr")
+        deterministic.append(item(scorecard, f"Rewritten by the code: `{target}` → `{rewrite.get('suggested') or 'SUM(...)'}`."))
+    candidates = [item(scorecard, _why_genie(scorecard)) for scorecard in blocking if scorecard.get("repair_route") == "GENIE_PATCH"]
+    mapping_blockers = [scorecard for scorecard in blocking if scorecard.get("status") == "BLOCKED_UNRESOLVED_MAPPING"]
+    waiting = [
+        item(scorecard, "Left out by the import with a reason; a person decides." if scorecard.get("status") == "EXCLUDED_BY_IMPORT"
+             else "Needs a person's decision, not a repair.")
+        for scorecard in scorecards
+        if scorecard.get("repair_route") == "HUMAN_DECISION"
+    ]
+    blocked_by = [str(entry.get("name") or "relationship") for entry in relationship_blockers] + [
+        f"{scorecard.get('source_name')} (unmapped datasource)" for scorecard in mapping_blockers
+    ]
+    if candidates and blocked_by:
+        use_genie = False
+        summary = (
+            f"Genie not used: {len(candidates)} measure(s) would need it, but {', '.join(blocked_by[:3])}"
+            f"{' and more' if len(blocked_by) > 3 else ''} must be fixed in the mapping first; this attempt stops anyway, "
+            "so Genie's patch would be discarded."
+        )
+    elif candidates:
+        use_genie = True
+        names = ", ".join(str(entry["measure"]) for entry in candidates[:3]) + (", …" if len(candidates) > 3 else "")
+        summary = f"Genie used for {len(candidates)} measure(s) that have no deterministic fix: {names}."
+    elif deterministic:
+        use_genie = False
+        summary = f"Genie not needed: the code rewrites all {len(deterministic)} fixable measure(s) itself."
+    else:
+        use_genie = False
+        summary = "Genie not needed: no measure has a failure that repair can fix."
+    return {
+        "use_genie": use_genie,
+        "summary": summary,
+        "genie_items": candidates,
+        "deterministic_items": deterministic,
+        "waiting_for_people": waiting,
+        "blocked_by": blocked_by,
+    }
 
 
 def _is_bare_column(expression: str) -> bool:

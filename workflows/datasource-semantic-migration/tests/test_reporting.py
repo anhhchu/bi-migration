@@ -339,3 +339,19 @@ def test_semantic_coverage_counts_each_field_in_a_grouped_entry():
     assert review["coverage"]["semantic_coverage_percent"] == 40.0
     translation = next(stage for stage in review["gate"]["stages"] if stage["key"] == "translation")
     assert "3 item(s) not migrated" in translation["summary"]
+
+
+def test_repair_report_shows_the_genie_decision():
+    decision = {
+        "use_genie": True,
+        "summary": "Genie used for 1 measure(s) that have no deterministic fix: Gross Margin.",
+        "genie_items": [{"measure": "Gross Margin", "failure_codes": ["MISSING_TARGET_MEASURE"], "why": "The Metric View has no measure for it."}],
+        "deterministic_items": [],
+        "waiting_for_people": [],
+        "blocked_by": [],
+    }
+    review = build_repair_review(summary={"genie_decision": decision}, evaluation={"scorecards": []})
+    html = render_repair_html(review)
+
+    assert review["genie_decision"] == decision
+    assert "Genie repair decision" in html and "Sent to Genie" in html and "The Metric View has no measure for it." in html

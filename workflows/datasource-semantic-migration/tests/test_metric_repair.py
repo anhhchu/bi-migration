@@ -454,3 +454,53 @@ def test_sum_distinct_is_not_a_sum():
     scorecard = evaluation["scorecards"][0]
     assert scorecard["failure_codes"] == ["AGGREGATION_MISMATCH"]
     assert build_deterministic_patch(evaluation, {"measures": []})["operations"][0]["after"] == "SUM(amount)"
+
+
+def test_genie_decision_explains_each_measure_sent_to_genie():
+    evaluation = evaluate_candidate(
+        source_metric_irs=[{"measures": [measure("Gross Margin"), measure("Sales"), field_measure("Price", "AVG")]}],
+        metric_view={
+            "source": ORDERS,
+            "measures": [{"name": "Sales", "expr": "SUM(sales)"}, {"name": "Price", "expr": "SUM(price)"}],
+        },
+        target_profile=PROFILE,
+        query_results={"sales": {"status": "FAIL", "error": "UNRESOLVED_COLUMN sales\nmore"}, "price": {"status": "PASS"}},
+    )
+
+    decision = evaluation["genie_decision"]
+    assert decision["use_genie"] is True and evaluation["needs_genie"] is True
+    assert decision["summary"] == "Genie used for 2 measure(s) that have no deterministic fix: Gross Margin, Sales."
+    reasons = {entry["measure"]: entry["why"] for entry in decision["genie_items"]}
+    assert "no measure" in reasons["Gross Margin"]
+    assert "UNRESOLVED_COLUMN sales" in reasons["Sales"] and "more" not in reasons["Sales"]
+    assert decision["deterministic_items"][0]["why"] == "Rewritten by the code: `SUM(price)` → `AVG(price)`."
+
+
+def test_genie_decision_says_why_genie_is_not_used():
+    blocked = evaluate_candidate(
+        source_metric_irs=[{"measures": [measure("Gross Margin"), measure("Target", dependencies=[{"kind": "external_field"}])]}],
+        metric_view={"source": ORDERS, "measures": []},
+        target_profile=PROFILE,
+    )["genie_decision"]
+    assert blocked["use_genie"] is False
+    assert "Target (unmapped datasource) must be fixed in the mapping first" in blocked["summary"]
+
+    clean = evaluate_candidate(
+        source_metric_irs=[{"measures": [measure("Sales")]}],
+        metric_view={"source": ORDERS, "measures": [{"name": "Sales", "expr": "SUM(sales)"}]},
+        target_profile=PROFILE,
+        query_results={"sales": {"status": "PASS"}},
+    )["genie_decision"]
+    assert clean["summary"] == "Genie not needed: no measure has a failure that repair can fix."
+
+
+def test_any_sql_aggregate_satisfies_a_per_row_formula():
+    evaluation = evaluate_candidate(
+        source_metric_irs=[{"measures": [measure("Hour Label", status="NEEDS_AGGREGATION_COMPILATION")]}],
+        metric_view={"source": ORDERS, "measures": [{"name": "Hour Label", "expr": "ST_UNION_AGG(ST_POINT(8.5, -0.5 - `Hour`, 4326))"}]},
+        target_profile=PROFILE,
+        query_results={"hour label": {"status": "PASS"}},
+    )
+
+    assert evaluation["scorecards"][0]["status"] == "PASS_SEMANTIC_ONLY"
+    assert evaluation["needs_genie"] is False

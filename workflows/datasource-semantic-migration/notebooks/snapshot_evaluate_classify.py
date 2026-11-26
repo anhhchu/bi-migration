@@ -90,6 +90,7 @@ write_json_artifact(
         "blocking_findings": evaluation["blocking_findings"],
         "relationship_blockers": evaluation["relationship_blockers"],
         "needs_genie": evaluation["needs_genie"],
+        "genie_decision": evaluation["genie_decision"],
         "failure_signature": evaluation["failure_signature"],
     },
     attempt_dir / "failure-classification.json",
@@ -98,6 +99,7 @@ for key, value in {
     "attempt_dir": str(attempt_dir),
     "repair_series_id": repair_series_id,
     "needs_genie": "true" if evaluation["needs_genie"] else "false",
+    "genie_reason": evaluation["genie_decision"]["summary"],
     "readiness": evaluation["readiness"],
 }.items():
     dbutils.jobs.taskValues.set(key=key, value=value)
@@ -108,6 +110,7 @@ result = {
     "coverage": evaluation["coverage"],
     "blocking_findings": len(evaluation["blocking_findings"]),
     "needs_genie": evaluation["needs_genie"],
+    "genie_decision": evaluation["genie_decision"]["summary"],
     "attempt_dir": str(attempt_dir),
 }
 print("\n=== Snapshot, Evaluate, Classify ===")

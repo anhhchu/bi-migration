@@ -643,6 +643,7 @@ def build_repair_review(*, summary: dict[str, Any], evaluation: dict[str, Any], 
         "progress": progress,
         "decision_reasons": decision_reasons,
         "coverage_gates": gates,
+        "genie_decision": summary.get("genie_decision") or evaluation.get("genie_decision"),
         "blocking_findings": blocking_findings,
         "relationship_blockers": evaluation.get("relationship_blockers", []),
         "scorecards": scorecards,
@@ -682,6 +683,21 @@ def render_repair_html(review: dict[str, Any]) -> str:
         )
     coverage_rows = "".join(coverage_parts)
     decision_rows = "".join(f"<li>{escape(item)}</li>" for item in review["decision_reasons"])
+    genie = review.get("genie_decision") or {}
+    genie_rows = "".join(
+        f"<tr><td>{escape(str(entry['measure']))}</td><td>{escape(label)}</td><td>{escape(entry['why'])}</td></tr>"
+        for label, key in (("Sent to Genie", "genie_items"), ("Fixed by code", "deterministic_items"),
+                           ("Waiting for a person", "waiting_for_people"))
+        for entry in genie.get(key, [])
+    )
+    genie_section = (
+        f"<section><h2>Genie repair decision</h2><p><strong>{escape(genie.get('summary', ''))}</strong></p>"
+        + (f"<table><thead><tr><th>Measure</th><th>Handled as</th><th>Why</th></tr></thead><tbody>{genie_rows}</tbody></table>"
+           if genie_rows else "")
+        + "</section>"
+        if genie
+        else ""
+    )
     blocking_parts = []
     for item in review["blocking_findings"]:
         failure_details = "<br>".join(
@@ -730,6 +746,7 @@ def render_repair_html(review: dict[str, Any]) -> str:
         f"<p>Semantic group: {escape(str(review['group_id']))}</p><h1>Metric View repair review</h1>"
         f"<p class='badge'>{escape(str(review['status']))}</p><p>{escape(review['headline'])}</p>"
         f"<section><h2>Decision</h2><ul>{decision_rows}</ul></section>"
+        f"{genie_section}"
         f"<section><h2>Coverage gates</h2><table><thead><tr><th>Gate and meaning</th><th>Before</th><th>After</th><th>Required</th><th>Result</th></tr></thead><tbody>{coverage_rows}</tbody></table></section>"
         f"<section><h2>Query execution</h2><p>{query['passed']} of {query['translated_measures']} translated measures executed successfully; "
         f"{query['failed']} failed and {query['not_run']} were not run.</p><p><strong>Not run:</strong> {escape(', '.join(query['not_run_metrics']) or 'None')}. "

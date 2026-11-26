@@ -209,6 +209,7 @@ summary = {
     "rollback_reason": rollback_reason,
     "progress": progress,
     "retry_decision": decision,
+    "genie_decision": initial_evaluation.get("genie_decision"),
     "stop_reason": stop_reason,
     "next_run_id": next_run_id,
     "attempt_dir": str(attempt_dir),

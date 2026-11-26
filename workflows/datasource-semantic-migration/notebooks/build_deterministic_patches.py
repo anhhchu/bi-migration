@@ -31,22 +31,29 @@ genie_request = {
     "findings": [
         item for item in evaluation["blocking_findings"] if item.get("repair_route") == "GENIE_PATCH"
     ],
+    # Why each finding was sent to Genie instead of the deterministic patch.
+    "decision": evaluation.get("genie_decision"),
 }
 write_json_artifact(genie_request, attempt_dir / "genie-request.json")
 changed = document_hash(candidate) != document_hash(patched_candidate)
 for key, value in {
     "repair_series_id": evaluation["repair_series_id"],
     "needs_genie": "true" if evaluation["needs_genie"] else "false",
+    "genie_reason": (evaluation.get("genie_decision") or {}).get("summary", ""),
     "genie_request_path": str(attempt_dir / "genie-request.json"),
     "genie_patch_path": str(attempt_dir / "genie-patch.json"),
     "genie_candidate_path": str(attempt_dir / "candidate-genie.yaml"),
 }.items():
     dbutils.jobs.taskValues.set(key=key, value=value)
+decision = evaluation.get("genie_decision") or {}
 result = {
     "readiness": evaluation["readiness"],
     "operation_count": len(patch["operations"]),
     "candidate_changed": changed,
     "needs_genie": evaluation["needs_genie"],
+    "genie_decision": decision.get("summary"),
+    "sent_to_genie": [f"{item['measure']}: {item['why']}" for item in decision.get("genie_items", [])],
+    "fixed_by_code": [f"{item['measure']}: {item['why']}" for item in decision.get("deterministic_items", [])],
     "patch_path": str(attempt_dir / "deterministic-patch.json"),
 }
 print("\n=== Build Deterministic Patches ===")
