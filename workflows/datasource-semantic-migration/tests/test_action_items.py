@@ -137,3 +137,24 @@ def test_lineage_error_stays_blocking_after_per_measure_checks():
     assert data_mapping["blocking"] is True
     assert any("main.gold.customers_pii" in item["detail"] for item in data_mapping["items"])
     assert not any("fixed by repair" in item["detail"] for group in result["groups"] for item in group["items"])
+
+
+def test_number_check_mismatches_block_and_matches_are_automatic():
+    parity = {
+        "summary": {"status": "MISMATCH"},
+        "outcomes": [
+            {"measure": "Sales", "status": "PASS_EXACT", "checks": []},
+            {"measure": "Profit", "status": "FAILED_VALUE", "checks": [
+                {"status": "MISMATCH", "grouped_by": "Region", "differences": [{"group": "East", "candidate": 9, "reference": 10}], "difference_count": 2}
+            ]},
+            {"measure": "Forecast", "status": "NOT_COMPARABLE", "reason": "No reference value: function X is not supported yet.", "checks": []},
+        ],
+    }
+    result = actions(parity=parity)
+
+    number_checks = next(group for group in result["groups"] if group["category"] == "number_checks")
+    profit = next(item for item in number_checks["items"] if item["title"] == "Profit")
+    assert profit["blocking"] and "Metric View 9 vs extract 10 for Region = East (and 1 more)" in profit["detail"]
+    assert any("function X" in item["detail"] for item in number_checks["items"])
+    assert any(entry["detail"].startswith("Numbers match") for entry in result["automatic"])
+    assert not any(group["category"] == "calculation" for group in result["groups"])

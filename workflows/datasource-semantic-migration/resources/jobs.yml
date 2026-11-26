@@ -223,6 +223,34 @@ resources:
               - lark==1.3.1
               - PyYAML==6.0.3
 
+    datasource_semantic_number_check:
+      name: 'Datasource number check'
+      performance_target: PERFORMANCE_OPTIMIZED
+      tags:
+        aidevkit_project: bi-migration-blueprint
+      max_concurrent_runs: 10
+      parameters:
+        - name: group_path
+          default: ''
+      tasks:
+        - task_key: check_numbers
+          notebook_task:
+            notebook_path: ../notebooks/check_numbers.py
+            base_parameters:
+              group_path: '{{job.parameters.group_path}}'
+              catalog: ${var.candidate_catalog}
+              staging_schema: ${var.staging_schema}
+          environment_key: extracts
+      environments:
+        - environment_key: extracts
+          spec:
+            environment_version: '4'
+            dependencies:
+              - ../dist/*.whl
+              - lark==1.3.1
+              - PyYAML==6.0.3
+              - tableauhyperapi==0.0.26479
+
     datasource_semantic_repair:
       name: 'Datasource semantic repair'
       performance_target: PERFORMANCE_OPTIMIZED

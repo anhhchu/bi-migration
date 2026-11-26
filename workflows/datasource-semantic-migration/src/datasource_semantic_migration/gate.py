@@ -161,6 +161,49 @@ def _design_stage(*, scorecard_evaluation: dict[str, Any] | None, repair: dict[s
     return _stage("design", "Design", PASS, summary, query_failures=0)
 
 
+def _parity_stage(parity: dict[str, Any] | None, source: str) -> dict[str, Any]:
+    """The Parity stage from a number check against the extract, or not run without one."""
+    if not parity:
+        return _stage(
+            "parity", "Parity", NOT_RUN,
+            f"Numbers have not been compared with {source}. Run the Datasource number check on this group.",
+            "Run the Datasource number check Job with this group's group_path; it needs the extract in the upload.",
+        )
+    summary = parity.get("summary") or {}
+    compared, total = summary.get("compared_count", 0), summary.get("measure_count", 0)
+    outcomes = parity.get("outcomes") or []
+    failed = [item["measure"] for item in outcomes if item["status"] == "FAILED_VALUE"]
+    skipped = summary.get("NOT_COMPARABLE", 0)
+    status = summary.get("status")
+    if status == "NOT_COMPARABLE":
+        return _stage(
+            "parity", "Parity", NOT_RUN,
+            f"Numbers could not be compared with the {source} extract: {summary.get('reason') or 'no measure was comparable'}.",
+            "Upload the TDSX or TWBX with its extract, or add column mappings for the measures listed in the report.",
+            compared=0, measures=total,
+        )
+    if failed:
+        names = ", ".join(_short(name) for name in failed[:3]) + (", …" if len(failed) > 3 else "")
+        return _stage(
+            "parity", "Parity", FAIL,
+            f"{len(failed)} of {compared} compared measure(s) differ from the {source} extract ({names}).",
+            "Open each measure's numbers in the report, correct its expression in metric-view.yaml, then run the "
+            "Datasource semantic repair Job and the number check again.",
+            compared=compared, measures=total,
+        )
+    if skipped:
+        return _stage(
+            "parity", "Parity", WARN,
+            f"All {compared} compared measure(s) match the {source} extract; {skipped} could not be compared.",
+            "See why each measure was not compared; add column mappings where the report suggests them.",
+            compared=compared, measures=total,
+        )
+    return _stage(
+        "parity", "Parity", PASS, f"All {compared} measure(s) match the {source} extract.",
+        compared=compared, measures=total,
+    )
+
+
 def build_gate(
     *,
     has_candidate: bool,
@@ -171,18 +214,15 @@ def build_gate(
     untranslated: list[dict[str, Any]],
     review_actions: list[dict[str, Any]],
     source: str = "Tableau",
+    parity: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """source is the display name of the BI tool the Metric View was migrated from."""
+    """source is the display name of the BI tool; parity is the number check result, when it ran."""
     coverage = repair.get("coverage_after") or {}
     stages = [
         _translation_stage(has_candidate=has_candidate, coverage=coverage, untranslated=untranslated, source=source),
         _contract_stage(metric_view=metric_view, group_mapping=group_mapping),
         _design_stage(scorecard_evaluation=scorecard_evaluation, repair=repair, review_actions=review_actions),
-        _stage(
-            "parity", "Parity", NOT_RUN,
-            f"Numbers have not been compared with {source}. No trusted reference values were provided.",
-            f"Provide expected values from trusted {source} reports to compare against.",
-        ),
+        _parity_stage(parity, source),
         _stage(
             "performance", "Performance", NOT_RUN, "Query speed has not been measured.",
             "Time the Metric View on the dashboard's real query patterns.",
@@ -202,9 +242,15 @@ def build_gate(
     elif first_warn:
         status, headline, next_stage = "NEEDS_REVIEW", f"Needs review at {first_warn['label']}.", first_warn
     else:
-        status = "READY_FOR_PARITY"
-        headline = f"Translation, contract, and design checks pass. Next: compare numbers with {source}."
-        next_stage = next(stage for stage in stages if stage["key"] == "parity")
+        parity_stage = next(stage for stage in stages if stage["key"] == "parity")
+        if parity_stage["status"] == PASS:
+            status = "READY_FOR_SIGN_OFF"
+            headline = f"Checks pass and numbers match the {source} extract. Next: measure performance and certify."
+            next_stage = next(stage for stage in stages if stage["key"] == "performance")
+        else:
+            status = "READY_FOR_PARITY"
+            headline = f"Translation, contract, and design checks pass. Next: compare numbers with {source}."
+            next_stage = parity_stage
     return {
         "schema_version": "1.0",
         "status": status,

@@ -155,7 +155,9 @@ def build_group_review(
     metric_view: dict[str, Any] | None = None,
     scorecard_evaluation: dict[str, Any] | None = None,
     group_mapping: dict[str, Any] | None = None,
+    parity: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    """parity is the latest number check result for the group (parity-results.json), when one ran."""
     source = source_label(group)
     agent_result = evaluation.get("agent_result") or {}
     measure_expressions = {
@@ -271,6 +273,7 @@ def build_group_review(
         repair=repair,
         has_candidate=bool(final_result.get("metric_view_fqn")),
         source=source,
+        parity=parity,
     )
     # Dashboard-only items are not part of the model, so they do not lower semantic coverage.
     human_untranslated = action_groups.pop("_needs_people")
@@ -294,6 +297,7 @@ def build_group_review(
             if action_group["category"] in {"calculation", "access_platform", "data_mapping"}
         ],
         source=source,
+        parity=parity,
     )
     readiness = {"BLOCKED": "BLOCKED", "NEEDS_REVIEW": "NEEDS_REVIEW", "CHECKS_PENDING": "NEEDS_REVIEW"}.get(
         gate["status"], "READY"
@@ -306,6 +310,7 @@ def build_group_review(
         "group_id": group["group_id"],
         "display_name": group.get("display_name"),
         "source_system": source_system_of(group),
+        "parity": {"summary": (parity or {}).get("summary"), "outcomes": (parity or {}).get("outcomes", [])} if parity else None,
         "status": final_result["status"],
         "readiness": readiness,
         "headline": headline,

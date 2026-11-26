@@ -208,6 +208,63 @@ def _merge_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return result
 
 
+def _difference_text(check: dict[str, Any]) -> str:
+    first = (check.get("differences") or [{}])[0]
+    where = "in total" if not check.get("grouped_by") else f"for {check['grouped_by']} = {first.get('group')}"
+    more = check.get("difference_count", 1) - 1
+    return f"Metric View {first.get('candidate')} vs extract {first.get('reference')} {where}" + (f" (and {more} more)" if more > 0 else "")
+
+
+def _add_parity_items(
+    buckets: dict[str, list[dict[str, Any]]], automatic: list[dict[str, str]], parity: dict[str, Any] | None, source: str
+) -> None:
+    """Number-check results: mismatches need a fix, unverified measures need evidence, matches are done."""
+    if not parity:
+        buckets["number_checks"].append(
+            _item(
+                f"Compare numbers with {source}",
+                f"Definitions were checked, but no values were compared with {source}.",
+                "Run the Datasource number check Job for this group; it compares every measure with the extract.",
+                blocking=False,
+            )
+        )
+        return
+    outcomes = parity.get("outcomes") or []
+    for outcome in outcomes:
+        if outcome["status"] == "FAILED_VALUE":
+            check = next(item for item in outcome["checks"] if item["status"] == "MISMATCH")
+            # Reported under Number checks (the Parity stage), not Calculation, so Design does not block twice.
+            buckets["number_checks"].append(
+                _item(
+                    outcome["measure"],
+                    f"Numbers differ from the {source} extract: {_difference_text(check)}.",
+                    "Correct the expression in groups/<group>/metric-view.yaml, run the Datasource semantic repair Job, "
+                    "then the number check again.",
+                    blocking=True,
+                )
+            )
+    unverified = [item for item in outcomes if item["status"] == "NOT_COMPARABLE"]
+    for outcome in unverified:
+        buckets["number_checks"].append(
+            _item(
+                outcome["measure"],
+                f"Not compared with the {source} extract: {outcome.get('reason') or 'no reason recorded'}",
+                "Add a column mapping in table-mapping.yaml if the report names a missing column; otherwise provide "
+                "expected values from trusted reports.",
+                blocking=False,
+            )
+        )
+    if not outcomes:
+        reason = (parity.get("summary") or {}).get("reason") or "no measure could be compared"
+        buckets["number_checks"].append(
+            _item(f"Compare numbers with {source}", f"Not compared: {reason}.",
+                  "Upload the TDSX or TWBX with its extract, then run the number check again.", blocking=False)
+        )
+    matched = [item["measure"] for item in outcomes if item["status"] in {"PASS_EXACT", "PASS_WITH_TOLERANCE"}]
+    for name in matched:
+        automatic.append({"title": name, "detail": f"Numbers match the {source} extract."})
+
+
 def build_action_groups(
     *,
     scorecard_evaluation: dict[str, Any] | None,
@@ -219,6 +276,7 @@ def build_action_groups(
     repair: dict[str, Any],
     has_candidate: bool,
     source: str = "Tableau",
+    parity: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """source is the display name of the BI tool the Metric View was migrated from."""
     buckets: dict[str, list[dict[str, Any]]] = {key: [] for key in CATEGORIES}
@@ -374,14 +432,7 @@ def build_action_groups(
     if repair.get("candidate_changed") and not repair.get("rolled_back"):
         automatic.append({"title": "Automatic repair", "detail": f"Repair changed the Metric View ({repair_status})."})
 
-    buckets["number_checks"].append(
-        _item(
-            f"Compare numbers with {source}",
-            f"Definitions were checked, but no values were compared with {source}.",
-            f"Provide expected values from trusted {source} reports (measure, filters, expected value).",
-            blocking=False,
-        )
-    )
+    _add_parity_items(buckets, automatic, parity, source)
     buckets["sign_off"].append(
         _item(
             "Certify for production",

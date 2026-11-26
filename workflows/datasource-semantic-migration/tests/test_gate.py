@@ -109,3 +109,26 @@ def test_unmet_repair_gates_keep_the_gate_from_reporting_ready():
     assert result["status"] == "NEEDS_REVIEW"
     assert design["status"] == "WARN"
     assert "overall metric translation coverage" in design["summary"]
+
+
+def _parity(statuses, reason=None):
+    from datasource_semantic_migration.parity import parity_summary
+
+    outcomes = [
+        {"measure": f"M{index}", "status": status, "reason": reason, "checks": [{"status": "MISMATCH", "grouped_by": None, "differences": [{"group": "total", "candidate": 1, "reference": 2}], "difference_count": 1}] if status == "FAILED_VALUE" else []}
+        for index, status in enumerate(statuses)
+    ]
+    return {"summary": parity_summary(outcomes, available=bool(outcomes), reason=reason), "outcomes": outcomes}
+
+
+def test_parity_stage_reports_the_number_check():
+    def parity_stage(parity):
+        return next(stage for stage in gate(parity=parity)["stages"] if stage["key"] == "parity")
+
+    assert parity_stage(None)["status"] == "NOT_RUN"
+    assert parity_stage(_parity(["PASS_EXACT", "PASS_WITH_TOLERANCE"]))["status"] == "PASS"
+    assert gate(parity=_parity(["PASS_EXACT"]))["status"] == "READY_FOR_SIGN_OFF"
+    assert parity_stage(_parity(["PASS_EXACT", "NOT_COMPARABLE"]))["status"] == "WARN"
+    failed = gate(parity=_parity(["PASS_EXACT", "FAILED_VALUE"]))
+    assert failed["status"] == "BLOCKED" and "differ from the Tableau extract" in failed["headline"] + str(failed["stages"])
+    assert parity_stage(_parity([], reason="no extract"))["status"] == "NOT_RUN"

@@ -16,6 +16,7 @@ from datasource_semantic_migration.metric_repair import (
     target_lineage,
 )
 from datasource_semantic_migration.notebook_results import format_notebook_result, render_volume_links_html
+from datasource_semantic_migration.parity import load_parity
 from datasource_semantic_migration.reporting import (
     build_group_review,
     build_repair_review,
@@ -255,6 +256,7 @@ group_review = build_group_review(
     metric_view=yaml.safe_load((group_path / "metric-view.yaml").read_text(encoding="utf-8")),
     scorecard_evaluation=evaluation,
     group_mapping=yaml.safe_load(group_mapping_path.read_text(encoding="utf-8")) if group_mapping_path.is_file() else None,
+    parity=load_parity(group_internal_path),
 )
 write_json_artifact(group_review, report_path / "migration-review.json")
 (report_path / "migration-review.html").write_text(

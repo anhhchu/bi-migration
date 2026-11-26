@@ -7,6 +7,7 @@ from pathlib import Path
 import yaml
 
 from datasource_semantic_migration.notebook_results import format_notebook_result, render_volume_links_html
+from datasource_semantic_migration.parity import load_parity
 from datasource_semantic_migration.reporting import build_group_review, build_workflow_review, render_workflow_html
 from datasource_semantic_migration.artifacts import write_json_artifact
 
@@ -66,6 +67,7 @@ for group in groups_index["groups"]:
         metric_view=metric_view or None,
         scorecard_evaluation=scorecard_evaluation,
         group_mapping=group_mapping or None,
+        parity=load_parity(group_internal_path),
     )
     group_reviews.append(review)
     write_json_artifact(review, group_report_path / "migration-review.json")

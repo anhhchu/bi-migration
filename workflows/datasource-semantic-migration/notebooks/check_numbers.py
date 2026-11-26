@@ -1,0 +1,220 @@
+# Databricks notebook source
+# Compare one migrated group's candidate Metric View with reference values computed on the Tableau extract.
+# The candidate itself is not changed. Writes groups/<group>/_internal/parity/parity-results.json, a cached
+# extract table and a temporary shadow Metric View in the staging schema, and refreshes the group's report.
+import json
+import shutil
+import tempfile
+from datetime import datetime, timezone
+from pathlib import Path
+
+import yaml
+
+from datasource_semantic_migration.artifacts import write_json_artifact
+from datasource_semantic_migration.metric_repair import create_metric_view_sql
+from datasource_semantic_migration.notebook_results import format_notebook_result, render_volume_links_html
+from datasource_semantic_migration.parity import (
+    bind_columns,
+    candidate_dimensions,
+    choose_dimensions,
+    compare_results,
+    comparison_queries,
+    measure_outcomes,
+    parity_summary,
+    plan_measures,
+    quote,
+    shadow_metric_view,
+    shadow_source_sql,
+)
+from datasource_semantic_migration.reporting import build_group_review, build_workflow_review, render_workflow_html
+from datasource_semantic_migration.source_systems import source_system_of
+from datasource_semantic_migration.sources.tableau.extracts import (
+    copy_extract,
+    datasource_extracts,
+    export_parquet,
+    main_table,
+)
+from datasource_semantic_migration.sources.tableau.formula_sql import FormulaTranslator
+
+WORKSPACE_URL = "https://" + spark.conf.get("spark.databricks.workspaceUrl").removeprefix("https://").rstrip("/")
+
+for widget_name in ("group_path", "catalog", "staging_schema"):
+    dbutils.widgets.text(widget_name, "")
+group_path = Path(dbutils.widgets.get("group_path").rstrip("/"))
+catalog = dbutils.widgets.get("catalog").strip()
+staging_schema = dbutils.widgets.get("staging_schema").strip()
+internal_path = group_path / "_internal"
+manifest = json.loads((internal_path / "group-manifest.json").read_text(encoding="utf-8"))
+run_root = group_path.parents[1]
+inventory = json.loads((run_root / "_internal" / "inventory" / "input-inventory.json").read_text(encoding="utf-8"))
+metric_view = yaml.safe_load((group_path / "metric-view.yaml").read_text(encoding="utf-8")) or {}
+group_mapping = yaml.safe_load((group_path / "mapping.yaml").read_text(encoding="utf-8")) or {}
+# Optional column mappings: table entries may carry `columns: {Tableau field: Databricks column}`.
+column_mappings = {
+    str(tableau): str(databricks)
+    for entry in group_mapping.get("table_mappings", [])
+    for tableau, databricks in (entry.get("columns") or {}).items()
+}
+parity_path = internal_path / "parity"
+started_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+staging = f"{quote(catalog)}.{quote(staging_schema)}"
+result = {"schema_version": "1.0", "group_id": manifest["group_id"], "started_at": started_at, "outcomes": []}
+
+
+def finish(summary_reason=None):
+    outcomes = result["outcomes"]
+    result["summary"] = parity_summary(outcomes, available=bool(outcomes), reason=summary_reason)
+    result["finished_at"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    write_json_artifact(result, parity_path / "parity-results.json")
+
+
+# 1. The datasource with an extract (the first one; its measures are the ones compared).
+chosen = None
+for datasource in manifest["datasources"]:
+    datasource_ir = json.loads(Path(datasource["datasource_ir_path"]).read_text(encoding="utf-8"))
+    extracts = datasource_extracts(inventory, datasource_ir)
+    if extracts:
+        chosen = (datasource, datasource_ir, extracts[0])
+        break
+if chosen is None:
+    finish("no datasource in this group has an extract in the upload (TDS and TWB files contain no data)")
+else:
+    datasource, datasource_ir, extract = chosen
+    result["datasource"] = datasource["datasource_name"]
+    result["extract"] = {key: extract[key] for key in ("package_path", "member_path", "byte_size", "key")}
+    extract_table = f"{staging}.{quote('bim_x_' + extract['key'])}"
+    shadow_view = f"{staging}.{quote('bim_shadow_' + manifest['group_id'].replace('-', '_')[:40] + '_' + extract['key'][:8])}"
+    # 2. Load the extract once; later checks of the same extract reuse the table.
+    if not spark.catalog.tableExists(f"{catalog}.{staging_schema}.bim_x_{extract['key']}"):
+        work = Path(tempfile.mkdtemp(prefix="extract-"))
+        try:
+            local_hyper = work / "extract.hyper"
+            copy_extract(extract["package_path"], extract["member_path"], local_hyper)
+            tables = export_parquet(local_hyper, run_root / "_internal" / "extracts" / extract["key"], work)
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+        table = main_table(tables)
+        result["extract"]["tables"] = [{key: item[key] for key in ("table", "rows")} for item in tables]
+        spark.sql(f"CREATE TABLE IF NOT EXISTS {extract_table} AS SELECT * FROM parquet.`{table['parquet_path']}`")
+        spark.sql(
+            f"COMMENT ON TABLE {extract_table} IS "
+            + json.dumps(f"Tableau extract {extract['member_path']} from {Path(extract['package_path']).name}; for number checks")
+        )
+    extract_columns = spark.table(extract_table).columns
+    # 3. The candidate source's output columns, and which extract column feeds each.
+    source = str(metric_view.get("source") or "").strip()
+    is_query = source.split(None, 1)[0].upper() in {"SELECT", "WITH"} if source else False
+    described = spark.sql(f"DESCRIBE QUERY {source}" if is_query else f"DESCRIBE TABLE {source}").collect()
+    output_columns = [
+        (row["col_name"], row["data_type"]) for row in described if row["col_name"] and not row["col_name"].startswith("#")
+    ]
+    binding = bind_columns(output_columns, extract_columns, metric_view=metric_view, column_mappings=column_mappings)
+    result["binding"] = binding
+    metric_ir = json.loads(Path(datasource["metric_ir_path"]).read_text(encoding="utf-8"))
+    translator = FormulaTranslator(datasource_ir, extract_columns)
+    plans = plan_measures(
+        metric_view=metric_view,
+        source_measures=metric_ir["measures"],
+        output_columns=output_columns,
+        binding=binding,
+        reference_for=translator.measure_reference,
+    )
+    try:
+        # 4. The shadow Metric View: the candidate with its source replaced by the extract.
+        shadow = shadow_metric_view(metric_view, shadow_source_sql(extract_table, output_columns, binding))
+        spark.sql(create_metric_view_sql(shadow_view.replace("`", ""), shadow))
+        dimensions = candidate_dimensions(metric_view, binding)
+        distinct_counts = {}
+        if dimensions:
+            columns = sorted({item["extract_column"] for item in dimensions})
+            counts_row = spark.sql(
+                "SELECT " + ", ".join(f"COUNT(DISTINCT {quote(column)}) AS c{index}" for index, column in enumerate(columns))
+                + f" FROM {extract_table}"
+            ).collect()[0]
+            distinct_counts = {column: counts_row[f"c{index}"] for index, column in enumerate(columns)}
+        chosen_dimensions = choose_dimensions(dimensions, distinct_counts)
+        result["dimensions"] = chosen_dimensions
+        comparisons, query_errors = [], {}
+
+        def run(plan_subset, dimension):
+            queries = comparison_queries(shadow_view=shadow_view, extract_table=extract_table, plans=plan_subset, dimension=dimension)
+            candidate_rows = [row.asDict() for row in spark.sql(queries["candidate"]).collect()]
+            reference_rows = [row.asDict() for row in spark.sql(queries["reference"]).collect()]
+            return compare_results(plan_subset, candidate_rows, reference_rows, grouped_by=dimension["dimension"] if dimension else None)
+
+        comparable = [plan for plan in plans if plan["comparable"]]
+        for dimension in [None, *chosen_dimensions]:
+            try:
+                comparisons.append(run(comparable, dimension))
+            except Exception:
+                # One failing measure must not hide the others: retry one measure at a time.
+                merged = {}
+                for plan in comparable:
+                    try:
+                        merged.update(run([plan], dimension))
+                    except Exception as error:
+                        query_errors.setdefault(plan["measure"], str(error)[:500])
+                comparisons.append(merged)
+        for plan in plans:
+            if plan["measure"] in query_errors and plan["comparable"]:
+                plan.update(comparable=False, reason=f"Comparison query failed: {query_errors[plan['measure']]}")
+        result["plans"] = plans
+        result["outcomes"] = measure_outcomes(plans, comparisons)
+        finish()
+    except Exception as error:
+        result["plans"] = plans
+        result["error"] = str(error)[:2000]
+        finish(f"the shadow Metric View could not be created or queried: {str(error)[:300]}")
+    finally:
+        spark.sql(f"DROP VIEW IF EXISTS {shadow_view}")
+
+# 5. Refresh this group's report and the run index with the number check.
+group_report_path = Path(manifest.get("report_path") or run_root / "reports" / "groups" / manifest["group_id"])
+evaluation_path = internal_path / "evaluation.json"
+evaluation = json.loads(evaluation_path.read_text(encoding="utf-8")) if evaluation_path.is_file() else {}
+final_result_path = internal_path / "final-result.json"
+final_result = json.loads(final_result_path.read_text(encoding="utf-8")) if final_result_path.is_file() else {"status": "PARTIAL"}
+scorecard_evaluation = None
+attempt_dir = (evaluation.get("repair") or {}).get("attempt_dir")
+if attempt_dir and (Path(attempt_dir) / "evaluation-after.json").is_file():
+    scorecard_evaluation = json.loads((Path(attempt_dir) / "evaluation-after.json").read_text(encoding="utf-8"))
+review = build_group_review(
+    group={
+        "group_id": manifest["group_id"],
+        "display_name": manifest.get("display_name"),
+        "source_system": source_system_of(manifest),
+        "group_path": str(group_path),
+        "internal_path": str(internal_path),
+        "report_path": str(group_report_path),
+        "source_summary_path": str(internal_path / "source-summary.json"),
+    },
+    final_result=final_result,
+    evaluation=evaluation,
+    metric_view=metric_view,
+    scorecard_evaluation=scorecard_evaluation,
+    group_mapping=group_mapping,
+    parity=result,
+)
+write_json_artifact(review, group_report_path / "migration-review.json")
+(group_report_path / "migration-review.html").write_text(
+    render_workflow_html({"workspace_url": WORKSPACE_URL, **build_workflow_review(workflow_run_id=manifest["workflow_run_id"], groups=[review])}),
+    encoding="utf-8",
+)
+group_reviews = [
+    review if path.parent.name == manifest["group_id"] else json.loads(path.read_text(encoding="utf-8"))
+    for path in sorted((run_root / "reports" / "groups").glob("*/migration-review.json"))
+]
+summary = build_workflow_review(workflow_run_id=manifest["workflow_run_id"], groups=group_reviews)
+write_json_artifact(summary, run_root / "reports" / "index.json")
+(run_root / "reports" / "index.html").write_text(render_workflow_html({"workspace_url": WORKSPACE_URL, **summary}), encoding="utf-8")
+
+output = {
+    "group_id": manifest["group_id"],
+    "parity": result["summary"],
+    "parity_results_path": str(parity_path / "parity-results.json"),
+    "report_path": str(group_report_path / "migration-review.html"),
+}
+print("\n=== Datasource number check ===")
+print(format_notebook_result(output))
+displayHTML(render_volume_links_html(output))
+dbutils.notebook.exit(format_notebook_result(output))

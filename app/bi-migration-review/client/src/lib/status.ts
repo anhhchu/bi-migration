@@ -21,6 +21,7 @@ const LABELS: Record<string, string> = {
   EXHAUSTED: 'Attempts exhausted',
   SUPERSEDED: 'Superseded',
   READY_FOR_PARITY: 'Ready for parity',
+  READY_FOR_SIGN_OFF: 'Numbers match; ready for sign-off',
   CHECKS_PENDING: 'Checks pending',
   BLOCKING: 'Blocking',
   MIGRATION_IN_PROGRESS: 'Migration in progress',
