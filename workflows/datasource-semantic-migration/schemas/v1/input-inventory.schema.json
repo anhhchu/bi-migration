@@ -68,13 +68,14 @@
           "asset_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
           "relative_path": {"type": "string", "minLength": 1},
           "source_path": {"type": "string", "minLength": 1},
-          "kind": {"enum": ["TDS", "TDSX"]},
+          "kind": {"enum": ["TDS", "TDSX", "TWB", "TWBX"]},
           "byte_size": {"type": "integer", "minimum": 0},
           "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
           "duplicate_of": {"type": ["string", "null"]},
           "tds_documents": {"type": "array"},
           "archive_members": {"type": "array"},
-          "embedded_extracts": {"type": "array"}
+          "embedded_extracts": {"type": "array"},
+          "published_datasources": {"type": "array", "items": {"type": "string"}}
         },
         "additionalProperties": false
       }

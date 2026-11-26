@@ -12,9 +12,18 @@ from xml.etree import ElementTree
 
 from ... import __version__
 from ...artifacts import sha256_file
+from .workbooks import (
+    datasource_document,
+    document_slug,
+    extract_references,
+    parse_workbook_xml,
+    workbook_datasources,
+)
 
 
-SUPPORTED_DATASOURCE_SUFFIXES = {".tds", ".tdsx"}
+SUPPORTED_DATASOURCE_SUFFIXES = {".tds", ".tdsx", ".twb", ".twbx"}
+# The definition each package kind holds; it is the only member discovery unzips.
+PACKAGE_DEFINITION_SUFFIXES = {".tdsx": ".tds", ".twbx": ".twb"}
 # Any YAML, JSON, or CSV file in mappings/ is read as table mapping; several files are merged.
 SUPPORTED_MAPPING_SUFFIXES = {".yaml", ".yml", ".json", ".csv"}
 EMBEDDED_EXTRACT_SUFFIXES = {".hyper", ".tde"}
@@ -26,10 +35,18 @@ class UnsafeArchiveError(ValueError):
 
 @dataclass(frozen=True)
 class DiscoveryLimits:
+    """Safety limits for untrusted uploads.
+
+    Discovery unzips only definitions (.tds, .twb), so extracts of any size pass: they are listed,
+    not copied. The definition limits bound memory, because XML is parsed whole. The member and
+    uncompressed limits apply only to the TWBX-to-TDSX test converter, which copies extracts.
+    """
+
     maximum_archive_entries: int = 10_000
     maximum_member_bytes: int = 512 * 1024 * 1024
     maximum_uncompressed_bytes: int = 2 * 1024 * 1024 * 1024
     maximum_tds_bytes: int = 128 * 1024 * 1024
+    maximum_workbook_bytes: int = 256 * 1024 * 1024
 
 
 def _utc_timestamp() -> str:
@@ -63,20 +80,26 @@ def _copy_bounded(source: BinaryIO, destination: BinaryIO, limit: int) -> int:
     return written
 
 
-def safely_extract_tdsx(
+def open_package(
     archive_path: Path,
     destination: Path,
     *,
+    definition_suffix: str,
     limits: DiscoveryLimits | None = None,
 ) -> list[dict[str, Any]]:
+    """Check a .tdsx or .twbx and unzip only its definitions; list every other member.
+
+    Security checks cover every member. Extracts and other data files are listed with their declared
+    size and are not copied (extracted_path is None).
+    """
     limits = limits or DiscoveryLimits()
     if not zipfile.is_zipfile(archive_path):
-        raise UnsafeArchiveError(f"Packaged datasource is not a valid ZIP archive: {archive_path.name}")
+        raise UnsafeArchiveError(f"Package is not a valid ZIP archive: {archive_path.name}")
+    definition_limit = limits.maximum_workbook_bytes if definition_suffix == ".twb" else limits.maximum_tds_bytes
 
     destination.mkdir(parents=True, exist_ok=True)
-    extracted: list[dict[str, Any]] = []
+    listed: list[dict[str, Any]] = []
     seen_paths: set[str] = set()
-    actual_total = 0
 
     with zipfile.ZipFile(archive_path) as archive:
         members = archive.infolist()
@@ -84,12 +107,6 @@ def safely_extract_tdsx(
             raise UnsafeArchiveError(
                 f"Archive contains {len(members)} entries; limit is {limits.maximum_archive_entries}"
             )
-        declared_total = sum(member.file_size for member in members if not member.is_dir())
-        if declared_total > limits.maximum_uncompressed_bytes:
-            raise UnsafeArchiveError(
-                f"Archive declares {declared_total} uncompressed bytes; limit is {limits.maximum_uncompressed_bytes}"
-            )
-
         for member in members:
             member_path = _normalized_member_path(member.filename)
             normalized = member_path.as_posix()
@@ -102,44 +119,48 @@ def safely_extract_tdsx(
             if _is_symlink(member):
                 raise UnsafeArchiveError(f"Archive symlink is unsupported: {normalized}")
             if member.is_dir():
-                (destination / Path(*member_path.parts)).mkdir(parents=True, exist_ok=True)
                 continue
-            if member.file_size > limits.maximum_member_bytes:
-                raise UnsafeArchiveError(
-                    f"Archive member {normalized} declares {member.file_size} bytes; "
-                    f"limit is {limits.maximum_member_bytes}"
-                )
+            entry = {
+                "relative_path": normalized,
+                "extracted_path": None,
+                "byte_size": member.file_size,
+                "sha256": None,
+                "kind": _member_kind(member_path.suffix),
+            }
+            if member_path.suffix.casefold() == definition_suffix:
+                if member.file_size > definition_limit:
+                    raise UnsafeArchiveError(
+                        f"{normalized} declares {member.file_size} bytes; definition limit is {definition_limit}"
+                    )
+                output_path = destination / Path(*member_path.parts)
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+                try:
+                    with archive.open(member) as source, output_path.open("wb") as target:
+                        written = _copy_bounded(source, target, definition_limit)
+                except Exception:
+                    output_path.unlink(missing_ok=True)
+                    raise
+                entry.update({"extracted_path": output_path.as_posix(), "byte_size": written, "sha256": sha256_file(output_path)})
+            listed.append(entry)
+    return sorted(listed, key=lambda item: item["relative_path"].casefold())
 
-            output_path = destination / Path(*member_path.parts)
-            output_path.parent.mkdir(parents=True, exist_ok=True)
-            try:
-                with archive.open(member) as source, output_path.open("wb") as target:
-                    written = _copy_bounded(source, target, limits.maximum_member_bytes)
-            except Exception:
-                output_path.unlink(missing_ok=True)
-                raise
-            actual_total += written
-            if actual_total > limits.maximum_uncompressed_bytes:
-                output_path.unlink(missing_ok=True)
-                raise UnsafeArchiveError(
-                    f"Archive exceeds {limits.maximum_uncompressed_bytes} extracted bytes"
-                )
-            extracted.append(
-                {
-                    "relative_path": normalized,
-                    "extracted_path": output_path.as_posix(),
-                    "byte_size": written,
-                    "sha256": sha256_file(output_path),
-                    "kind": _member_kind(output_path.suffix),
-                }
-            )
-    return sorted(extracted, key=lambda item: item["relative_path"].casefold())
+
+def safely_extract_tdsx(
+    archive_path: Path,
+    destination: Path,
+    *,
+    limits: DiscoveryLimits | None = None,
+) -> list[dict[str, Any]]:
+    """The .tds definitions of a .tdsx unzipped; other members listed."""
+    return open_package(archive_path, destination, definition_suffix=".tds", limits=limits)
 
 
 def _member_kind(suffix: str) -> str:
     normalized = suffix.casefold()
     if normalized == ".tds":
         return "TDS"
+    if normalized == ".twb":
+        return "TWB"
     if normalized == ".hyper":
         return "HYPER"
     if normalized == ".tde":
@@ -226,6 +247,104 @@ def _mapping_inventory(mappings_path: Path) -> list[dict[str, Any]]:
     return mappings
 
 
+def _datasource_entry(
+    path: Path,
+    *,
+    document_path: str,
+    extracts: list[str],
+    limits: DiscoveryLimits,
+    workbook_datasource: str | None = None,
+) -> dict[str, Any]:
+    entry = inspect_tds(path, limits=limits)
+    entry.update({"document_path": document_path, "extracts": extracts})
+    if workbook_datasource is not None:
+        entry["workbook_datasource"] = workbook_datasource
+    return entry
+
+
+def _split_workbook(
+    asset: dict[str, Any],
+    document: bytes,
+    *,
+    workbook_path: str,
+    destination: Path,
+    member_names: list[str],
+    limits: DiscoveryLimits,
+) -> None:
+    """Write each datasource defined in the workbook as its own .tds document."""
+    root = parse_workbook_xml(document, name=workbook_path)
+    embedded, published = workbook_datasources(root)
+    if not embedded and not published:
+        raise ValueError(f"{asset['relative_path']} contains no connected datasources")
+    asset["published_datasources"] = published
+    used: set[str] = set()
+    for name, datasource in embedded:
+        tds_document = datasource_document(datasource)
+        slug = document_slug(Path(workbook_path).stem, name, tds_document, used)
+        output_path = destination / "datasources" / f"{slug}.tds"
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(tds_document)
+        asset["tds_documents"].append(
+            _datasource_entry(
+                output_path,
+                document_path=f"{workbook_path}#{name}",
+                extracts=extract_references(datasource, member_names),
+                limits=limits,
+                workbook_datasource=name,
+            )
+        )
+
+
+def _inventory_asset(asset: dict[str, Any], input_path: Path, destination: Path, limits: DiscoveryLimits) -> None:
+    """Fill the asset's datasource documents; packages are unzipped for their definitions only."""
+    suffix = input_path.suffix.casefold()
+    if suffix == ".tds":
+        asset["tds_documents"] = [
+            _datasource_entry(input_path, document_path=asset["relative_path"], extracts=[], limits=limits)
+        ]
+        return
+    if suffix == ".twb":
+        if asset["byte_size"] > limits.maximum_workbook_bytes:
+            raise ValueError(f"Workbook {input_path.name} exceeds {limits.maximum_workbook_bytes} bytes")
+        _split_workbook(
+            asset,
+            input_path.read_bytes(),
+            workbook_path=asset["relative_path"],
+            destination=destination,
+            member_names=[],
+            limits=limits,
+        )
+        return
+    definition_suffix = PACKAGE_DEFINITION_SUFFIXES[suffix]
+    members = open_package(input_path, destination, definition_suffix=definition_suffix, limits=limits)
+    asset["archive_members"] = members
+    asset["embedded_extracts"] = [member for member in members if member["kind"] in {"HYPER", "TDE"}]
+    member_names = [member["relative_path"] for member in members]
+    definitions = [member for member in members if member["extracted_path"]]
+    if suffix == ".tdsx":
+        if not definitions:
+            raise ValueError(f"Packaged datasource {asset['relative_path']} contains no .tds definition")
+        for member in definitions:
+            definition_path = Path(member["extracted_path"])
+            # inspect_tds checks size and refuses DTDs before the definition is parsed for its extracts.
+            entry = _datasource_entry(definition_path, document_path=member["relative_path"], extracts=[], limits=limits)
+            entry["extracts"] = extract_references(ElementTree.parse(definition_path).getroot(), member_names)
+            asset["tds_documents"].append(entry)
+        return
+    if len(definitions) != 1:
+        raise ValueError(
+            f"Packaged workbook {asset['relative_path']} must contain exactly one .twb; found {len(definitions)}"
+        )
+    _split_workbook(
+        asset,
+        Path(definitions[0]["extracted_path"]).read_bytes(),
+        workbook_path=definitions[0]["relative_path"],
+        destination=destination,
+        member_names=member_names,
+        limits=limits,
+    )
+
+
 def discover_inputs(
     *,
     datasources_path: str | Path,
@@ -242,11 +361,10 @@ def discover_inputs(
     output_root = Path(extraction_root)
     input_files = _discover_files(datasource_root, SUPPORTED_DATASOURCE_SUFFIXES)
     if not input_files:
-        raise ValueError(f"No .tds or .tdsx files found beneath {datasource_root}")
+        raise ValueError(f"No .tds, .tdsx, .twb, or .twbx files found beneath {datasource_root}")
 
     assets: list[dict[str, Any]] = []
     canonical_hashes: dict[str, str] = {}
-    embedded_extract_count = 0
     for input_path in input_files:
         relative_path = input_path.relative_to(datasource_root).as_posix()
         content_hash = sha256_file(input_path)
@@ -264,24 +382,12 @@ def discover_inputs(
             "tds_documents": [],
             "archive_members": [],
             "embedded_extracts": [],
+            "published_datasources": [],
         }
-        if duplicate_of is None and input_path.suffix.casefold() == ".tds":
-            asset["tds_documents"] = [inspect_tds(input_path, limits=limits)]
-        elif duplicate_of is None:
-            extraction_path = output_root / content_hash
-            members = safely_extract_tdsx(input_path, extraction_path, limits=limits)
-            tds_members = [member for member in members if member["kind"] == "TDS"]
-            if not tds_members:
-                raise ValueError(f"Packaged datasource {relative_path} contains no .tds definition")
-            asset["archive_members"] = members
-            asset["tds_documents"] = [
-                inspect_tds(Path(member["extracted_path"]), limits=limits) for member in tds_members
-            ]
-            asset["embedded_extracts"] = [
-                member for member in members if member["kind"] in {"HYPER", "TDE"}
-            ]
-            embedded_extract_count += len(asset["embedded_extracts"])
+        if duplicate_of is None:
+            _inventory_asset(asset, input_path, output_root / content_hash, limits)
         assets.append(asset)
+    embedded_extract_count = sum(len(asset["embedded_extracts"]) for asset in assets)
 
     inventory_basis = [
         {"relative_path": asset["relative_path"], "sha256": asset["sha256"]} for asset in assets
@@ -306,7 +412,11 @@ def discover_inputs(
             "duplicate_count": len(assets) - len(canonical_hashes),
             "tds_count": sum(asset["kind"] == "TDS" for asset in assets),
             "tdsx_count": sum(asset["kind"] == "TDSX" for asset in assets),
+            "twb_count": sum(asset["kind"] == "TWB" for asset in assets),
+            "twbx_count": sum(asset["kind"] == "TWBX" for asset in assets),
+            "datasource_document_count": sum(len(asset["tds_documents"]) for asset in assets),
             "embedded_extract_count": embedded_extract_count,
+            "published_datasource_count": sum(len(asset["published_datasources"]) for asset in assets),
             "mapping_file_count": len(mappings),
         },
         "assets": assets,

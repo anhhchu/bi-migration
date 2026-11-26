@@ -1,6 +1,6 @@
 # Datasource Semantic Migration
 
-Standalone Lakeflow Jobs that migrate Tableau datasource definitions (`.tds` and `.tdsx`) into governed candidate Unity Catalog Metric Views.
+Standalone Lakeflow Jobs that migrate Tableau datasource definitions (`.tds` and `.tdsx`, or the datasources inside `.twb` and `.twbx` workbooks) into governed candidate Unity Catalog Metric Views.
 
 The workflow separates proposal from execution:
 
@@ -144,8 +144,7 @@ Provide one Unity Catalog Volume folder with this contract:
 ```text
 /Volumes/<catalog>/<schema>/<volume>/<project>/
   datasources/
-    *.tds
-    *.tdsx
+    *.tds | *.tdsx | *.twb | *.twbx
   mappings/
     *.yaml | *.yml | *.json | *.csv
 ```
@@ -156,17 +155,14 @@ The mapping should identify the physical Databricks tables corresponding to Tabl
 
 The workflow does not substitute unrelated tables or compatibility views. Missing or ambiguous mapping evidence becomes a blocking finding.
 
-### Optional TWBX conversion
+### Workbooks, packages, and extracts
 
-To extract connected datasources from sample workbooks, validate them, and upload only valid TDSX packages:
+- **Workbooks:** each datasource defined in a `.twb` or `.twbx` is migrated as its own datasource, named `<workbook>#<datasource>`. Datasources a workbook only references from Tableau Server (published datasources) are listed in the inventory as `published_datasources`; upload their `.tdsx` to migrate them.
+- **Packages:** only the definition is unzipped (`.tds` from a `.tdsx`, `.twb` from a `.twbx`). Extracts and other data files are listed with their size and are not copied, so their size does not limit migration. The extract each datasource uses is recorded in its `extracts`.
+- **Safety limits:** every package member is checked for unsafe paths, symlinks, encryption, and duplicates, with at most 10,000 members. Definitions are parsed whole, so a `.tds` may be up to 128 MB and a `.twb` up to 256 MB. Files that fail these checks stop the run.
+- **Uploading:** the App takes files up to 100 MB. Upload larger files in Catalog Explorer (up to 5 GB per file) to `datasources/`.
 
-```bash
-uv run python scripts/convert_twbx_to_tdsx.py --upload \
-  --profile <profile-name> \
-  --volume-root /Volumes/<catalog>/<schema>/<volume>/<project>
-```
-
-Local conversion output is written beneath `build/tdsx-conversion/`.
+`scripts/convert_twbx_to_tdsx.py` is a local test utility; the workflow reads workbooks directly.
 
 ## Run the Workflow
 
@@ -181,7 +177,7 @@ databricks bundle run datasource_semantic_orchestrator \
 
 The proposal Job:
 
-- inventories and deduplicates TDS/TDSX files;
+- inventories and deduplicates TDS, TDSX, TWB, and TWBX files, taking each workbook's datasources apart;
 - parses Datasource IR and Metric IR in batches;
 - asks Genie Code for readable semantic domains;
 - validates membership, confidence, helper classification, and target compatibility;

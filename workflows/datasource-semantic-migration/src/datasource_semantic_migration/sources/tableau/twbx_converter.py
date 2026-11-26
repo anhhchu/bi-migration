@@ -12,24 +12,19 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any
-from urllib.parse import unquote
 from xml.etree import ElementTree
 
 from ...artifacts import sha256_file
 from .discovery import DiscoveryLimits, UnsafeArchiveError, inspect_tds, safely_extract_tdsx
 from .parser import parse_tableau_datasource
+from .workbooks import (
+    datasource_display_name,
+    extract_references,
+    local_name,
+    parse_workbook_xml,
+)
 
 
-PACKAGED_DATA_SUFFIXES = {
-    ".csv",
-    ".hyper",
-    ".json",
-    ".parquet",
-    ".tde",
-    ".txt",
-    ".xls",
-    ".xlsx",
-}
 
 
 @dataclass(frozen=True)
@@ -55,10 +50,6 @@ class ConvertedDatasource:
 
 def _utc_timestamp() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-
-
-def _local_name(tag: str) -> str:
-    return tag.rsplit("}", 1)[-1]
 
 
 def _safe_member_name(name: str) -> str:
@@ -122,39 +113,19 @@ def _load_workbook_root(
     twb_members = [member for member in members.values() if member.filename.casefold().endswith(".twb")]
     if len(twb_members) != 1:
         raise ValueError(f"{workbook_name} must contain exactly one .twb file; found {len(twb_members)}")
-    document = archive.read(twb_members[0])
-    prefix = document[:8192].upper()
-    if b"<!DOCTYPE" in prefix or b"<!ENTITY" in prefix:
-        raise ValueError(f"{workbook_name} contains a prohibited XML declaration")
-    try:
-        root = ElementTree.fromstring(document)
-    except ElementTree.ParseError as error:
-        raise ValueError(f"Invalid Tableau workbook XML in {workbook_name}: {error}") from error
-    if _local_name(root.tag) != "workbook":
-        raise ValueError(f"{workbook_name} does not have a workbook root element")
-    return root
+    return parse_workbook_xml(archive.read(twb_members[0]), name=workbook_name)
 
 
 def _datasources(root: ElementTree.Element) -> list[ElementTree.Element]:
-    container = next((child for child in root if _local_name(child.tag) == "datasources"), None)
+    container = next((child for child in root if local_name(child.tag) == "datasources"), None)
     if container is None:
         return []
     return [
         datasource
         for datasource in container
-        if _local_name(datasource.tag) == "datasource"
-        and any(_local_name(element.tag) == "connection" for element in datasource.iter())
+        if local_name(datasource.tag) == "datasource"
+        and any(local_name(element.tag) == "connection" for element in datasource.iter())
     ]
-
-
-def _display_name(datasource: ElementTree.Element, position: int) -> str:
-    caption = datasource.attrib.get("caption")
-    internal_name = datasource.attrib.get("name")
-    if caption:
-        return caption
-    if internal_name and not internal_name.casefold().startswith("federated."):
-        return internal_name
-    return f"Datasource {position}"
 
 
 def _slug(value: str, *, maximum_length: int = 120) -> str:
@@ -170,39 +141,26 @@ def _dependency_names(
     datasource: ElementTree.Element,
     members: dict[str, zipfile.ZipInfo],
 ) -> tuple[str, ...]:
-    candidate_members = {
-        _safe_member_name(member.filename).casefold(): _safe_member_name(member.filename)
-        for member in members.values()
-        if not member.is_dir() and Path(member.filename).suffix.casefold() in PACKAGED_DATA_SUFFIXES
-    }
-    references: set[str] = set()
-    for element in datasource.iter():
-        for raw_value in element.attrib.values():
-            value = unquote(raw_value).replace("\\", "/").removeprefix("./")
-            exact = candidate_members.get(value.casefold())
-            if exact:
-                references.add(exact)
-                continue
-            for member_key, member_name in candidate_members.items():
-                if member_key in value.casefold():
-                    references.add(member_name)
+    references = extract_references(
+        datasource, [_safe_member_name(member.filename) for member in members.values() if not member.is_dir()]
+    )
 
     connection_classes = {
         element.attrib.get("class", "").casefold()
         for element in datasource.iter()
-        if _local_name(element.tag) == "connection"
+        if local_name(element.tag) == "connection"
     }
     if "hyper" in connection_classes and not any(Path(name).suffix.casefold() == ".hyper" for name in references):
         raise ValueError(
-            f"Datasource {_display_name(datasource, 1)!r} has a Hyper connection but no packaged extract reference"
+            f"Datasource {datasource_display_name(datasource, 1)!r} has a Hyper connection but no packaged extract reference"
         )
     if "dataengine" in connection_classes and not any(
         Path(name).suffix.casefold() in {".hyper", ".tde"} for name in references
     ):
         raise ValueError(
-            f"Datasource {_display_name(datasource, 1)!r} has an extract connection but no packaged extract reference"
+            f"Datasource {datasource_display_name(datasource, 1)!r} has an extract connection but no packaged extract reference"
         )
-    return tuple(sorted(references, key=str.casefold))
+    return tuple(references)
 
 
 def _write_member(
@@ -280,7 +238,7 @@ def convert_twbx(
 
         used_names: set[str] = set()
         for position, datasource in enumerate(datasources, start=1):
-            datasource_name = _display_name(datasource, position)
+            datasource_name = datasource_display_name(datasource, position)
             base_name = _slug(f"{source_path.stem}--{datasource_name}")
             if base_name in used_names:
                 suffix = hashlib.sha256(

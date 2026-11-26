@@ -1,6 +1,6 @@
 # BI Migration Blueprint
 
-Migrate Tableau semantic models to governed Unity Catalog **Metric Views**. Point the workflow at Tableau datasource files (`.tds`/`.tdsx`) and a table mapping; it groups them into semantic domains, builds one candidate Metric View per group, evaluates it, repairs what it can automatically, and leaves people only the decisions that need them. A Databricks App drives the whole flow.
+Migrate Tableau semantic models to governed Unity Catalog **Metric Views**. Point the workflow at Tableau datasources or workbooks (`.tds`, `.tdsx`, `.twb`, `.twbx`) and a table mapping; it groups them into semantic domains, builds one candidate Metric View per group, evaluates it, repairs what it can automatically, and leaves people only the decisions that need them. A Databricks App drives the whole flow.
 
 > **Supported today:** datasource semantic migration. Dashboard migration (`.twb`/`.twbx` → AI/BI dashboards) is paused while it is being fixed; its code is still in the repository but hidden in the App.
 
@@ -51,7 +51,7 @@ Use these scripts rather than plain `databricks bundle deploy`: they set the Gen
 
    ```text
    <input-folder>/
-     datasources/   *.tds, *.tdsx
+     datasources/   *.tds, *.tdsx, *.twb, *.twbx
      mappings/      any YAML, JSON, or CSV pairing Tableau tables with Databricks tables (see the Mapping guide)
    ```
 

@@ -6,7 +6,7 @@ Databricks App ([AppKit](https://developers.databricks.com/docs/appkit/v0/), Rea
 
 | Step       | In the App                                                                                      | Job it runs                      |
 | ---------- | ----------------------------------------------------------------------------------------------- | -------------------------------- |
-| 1. Propose | Upload `.tds`/`.tdsx` + a table mapping (YAML, JSON, or CSV), or point to existing Volume files | Propose semantic groups          |
+| 1. Propose | Upload `.tds`/`.tdsx`/`.twb`/`.twbx` + a table mapping (YAML, JSON, or CSV), or point to existing Volume files | Propose semantic groups          |
 | 2. Approve | Check each group's datasources and target tables, then approve                                  | Migrate approved semantic groups |
 | 3. Review  | Per group: release gate stages, grouped action items, Catalog Explorer link, full HTML reports  | Semantic group and repair Jobs   |
 

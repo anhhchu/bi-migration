@@ -555,6 +555,9 @@ def parse_tableau_datasource(
 
 
 def _document_relative_path(asset: dict[str, Any], document: dict[str, Any]) -> str:
+    if document.get("document_path"):
+        return document["document_path"]
+    # Inventories written before discovery recorded document_path.
     if asset["kind"] == "TDS":
         return asset["relative_path"]
     member = next(
@@ -595,8 +598,9 @@ def parse_inventory_asset(inventory: dict[str, Any], asset_index: int) -> list[d
                 inventory_hash=inventory["inventory_hash"],
             )
         )
-    if not parsed:
+    if not parsed and not asset.get("published_datasources"):
         raise ValueError(f"Asset index {asset_index} contains no TDS documents")
+    # A workbook that only references published datasources has nothing to parse; discovery lists them.
     return parsed
 
 

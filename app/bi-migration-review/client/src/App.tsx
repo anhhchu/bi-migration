@@ -1321,9 +1321,25 @@ function UploadPanel({
             </label>
             <p>
               {migrationMode === 'semantic_model'
-                ? 'TDS/TDSX plus a table mapping (YAML, JSON, or CSV; any shape that pairs Tableau and Databricks tables), up to 100 MB each.'
+                ? 'TDS, TDSX, TWB, or TWBX files plus a table mapping (YAML, JSON, or CSV; any shape that pairs Tableau and Databricks tables).'
                 : 'TWB/TWBX plus CSV, JSON, YAML, or Markdown mappings, up to 100 MB each.'}
             </p>
+            {migrationMode === 'semantic_model' ? (
+              <div className="upload-limits">
+                <span>File size limits</span>
+                <ul>
+                  <li>Upload here: up to 100 MB per file.</li>
+                  <li>
+                    Larger files: upload them in Catalog Explorer (up to 5 GB per file) to{' '}
+                    <code>inputs/datasources/</code> in the folder above.
+                  </li>
+                  <li>
+                    Prefer TDSX or TWBX: they include the extract, which number checks against Tableau need. TDS and TWB
+                    files contain no data.
+                  </li>
+                </ul>
+              </div>
+            ) : null}
             <input
               ref={fileInputRef}
               id="tableau-files"
@@ -1331,7 +1347,7 @@ function UploadPanel({
               type="file"
               accept={
                 migrationMode === 'semantic_model'
-                  ? '.tds,.tdsx,.csv,.yaml,.yml,.json'
+                  ? '.tds,.tdsx,.twb,.twbx,.csv,.yaml,.yml,.json'
                   : '.twb,.twbx,.csv,.json,.yaml,.yml,.md'
               }
               multiple
@@ -1550,8 +1566,8 @@ function UploadPanel({
             <li className={datasourceCount > 0 ? 'readiness-checklist__done' : undefined}>
               {datasourceCount > 0 ? <CheckCircle2 aria-hidden="true" /> : <AlertCircle aria-hidden="true" />}
               {datasourceCount > 0
-                ? `${datasourceCount} Tableau ${datasourceCount === 1 ? 'datasource' : 'datasources'} (.tds/.tdsx)`
-                : 'Upload at least one .tds or .tdsx datasource'}
+                ? `${datasourceCount} Tableau ${datasourceCount === 1 ? 'file' : 'files'} (.tds, .tdsx, .twb, .twbx)`
+                : 'Upload at least one .tds, .tdsx, .twb, or .twbx file'}
             </li>
             <li className={hasTableMapping ? 'readiness-checklist__done' : undefined}>
               {hasTableMapping ? <CheckCircle2 aria-hidden="true" /> : <AlertCircle aria-hidden="true" />}

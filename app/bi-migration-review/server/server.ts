@@ -746,12 +746,12 @@ await createApp({
           const entryName = (entry: { path?: string; name?: string }) =>
             entry.name ?? (entry.path ?? '').split('/').pop() ?? '';
           const datasourceCount = (datasourceEntries ?? []).filter((entry) =>
-            /\.tdsx?$/i.test(entryName(entry))
+            /\.(tdsx?|twbx?)$/i.test(entryName(entry))
           ).length;
           if (!datasourceEntries || datasourceCount === 0) {
             response.status(404).json({
               error: datasourceEntries
-                ? `${inputRoot}/datasources contains no .tds or .tdsx files.`
+                ? `${inputRoot}/datasources contains no .tds, .tdsx, .twb, or .twbx files.`
                 : `No datasources folder found at ${inputRoot}/datasources, or the App cannot read it.`,
             });
             return;
@@ -2039,8 +2039,11 @@ await createApp({
           chunks.push(buffer);
         }
         const contents = Buffer.concat(chunks);
-        const isDashboardAsset = ['.twb', '.twbx'].includes(extension);
-        const isDatasourceAsset = ['.tds', '.tdsx'].includes(extension);
+        const isWorkbookFile = ['.twb', '.twbx'].includes(extension);
+        // Semantic-model migrations read the datasources inside workbooks, so workbooks go with datasources.
+        const isDatasourceAsset =
+          ['.tds', '.tdsx'].includes(extension) || (isWorkbookFile && activeMigrationMode === 'semantic_model');
+        const isDashboardAsset = isWorkbookFile && !isDatasourceAsset;
         const inputDirectory = isDashboardAsset ? 'workbooks' : isDatasourceAsset ? 'datasources' : 'mappings';
         const volumeRelativePath = `bi-migrations/${activeMigrationName}/inputs/${inputDirectory}/${storageFileName}`;
         if (!selectedVolume) {
@@ -2108,7 +2111,7 @@ await createApp({
         if (activeMigrationMode === 'semantic_model') {
           if (parsedRequest.data.inputMethod === 'upload') {
             if (!files.some((file) => file.kind === 'Tableau datasource')) {
-              response.status(400).json({ error: 'Upload at least one .tds or .tdsx datasource.' });
+              response.status(400).json({ error: 'Upload at least one .tds, .tdsx, .twb, or .twbx file.' });
               return;
             }
             if (!files.some((file) => file.kind === 'Mapping evidence' && MAPPING_FILE.test(file.name))) {
